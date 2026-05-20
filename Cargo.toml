@@ -22,6 +22,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2"
 globset = "0.4"
 libc = "0.2"
+# Used to pre-wrap preview/viewing message bodies so scroll math is exact —
+# avoids the cumulative drift our chars/width estimate produces at 1000+ msgs.
+textwrap = "0.16"
 uuid = { version = "1", features = ["v4"] }
 ratatui = "0.29"
 crossterm = "0.28"

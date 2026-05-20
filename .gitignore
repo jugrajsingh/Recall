@@ -6,3 +6,5 @@
 .fastembed_cache/
 recall-*.txt
 search-eval.json
+# Fork-only operations notebook — never push to upstream.
+FORK_PATCHES.md

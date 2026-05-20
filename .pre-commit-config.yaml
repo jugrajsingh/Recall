@@ -1,0 +1,37 @@
+# Pre-commit config for the recall fork.
+# Run `pre-commit install` once after cloning to enable the git hook.
+# Manual run: `pre-commit run --all-files`.
+
+repos:
+  # Generic hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^(.*\.md|.*\.rs)$
+      - id: end-of-file-fixer
+        exclude: ^Cargo\.lock$
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  # Rust formatting. Clippy is NOT in this hook — it requires the full tree
+  # to compile, but `pre-commit run` stashes unstaged files first, so a
+  # clippy check on a partial atomic commit sees an incomplete codebase
+  # and false-fails. Run clippy via `make check` or in CI on a full tree.
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --all -- --check
+        language: system
+        files: \.rs$
+        pass_filenames: false
+
+  # Secret scan — same gitleaks pin as the rest of DevToolKit.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks

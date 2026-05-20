@@ -9,13 +9,31 @@ RESET := \033[0m
 
 # ── Build ────────────────────────────────────────────────────────────────────
 
-.PHONY: build release
+.PHONY: build release release-mini release-full install-mini install-full
 
 build: ## Debug build
 	$(CARGO) build
 
-release: ## Release build (LTO + strip)
+release: ## Release build (LTO + strip, default features)
 	$(CARGO) build --release
+
+release-mini: ## Release build — FTS-only, no semantic search
+	$(CARGO) build --release --no-default-features
+	@printf '\n$(GREEN)  ✓ recall-mini built$(RESET)  ./target/release/recall\n\n'
+
+release-full: ## Release build — hybrid FTS + semantic
+	$(CARGO) build --release --features semantic-search
+	@printf '\n$(GREEN)  ✓ recall-full built$(RESET)  ./target/release/recall\n\n'
+
+install-mini: release-mini ## Build mini + install to ~/.cargo/bin/recall
+	@install -m 755 ./target/release/recall $$HOME/.cargo/bin/recall
+	@printf '$(GREEN)  installed recall-mini to ~/.cargo/bin/recall$(RESET)\n'
+	@$$HOME/.cargo/bin/recall info | grep -E "Variant|Version" || true
+
+install-full: release-full ## Build full + install to ~/.cargo/bin/recall
+	@install -m 755 ./target/release/recall $$HOME/.cargo/bin/recall
+	@printf '$(GREEN)  installed recall-full to ~/.cargo/bin/recall$(RESET)\n'
+	@$$HOME/.cargo/bin/recall info | grep -E "Variant|Version" || true
 
 # ── Quality ──────────────────────────────────────────────────────────────────
 

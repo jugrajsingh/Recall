@@ -13,6 +13,7 @@ use crate::types::{
     BackgroundJobStatus, MatchSource, Message, Role, SearchResult, SemanticProgress,
 };
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
     Search,
     Viewing,
@@ -55,7 +56,7 @@ fn build_viewing_caches(msgs: &[Message]) -> Vec<Vec<SanitizedLine>> {
         .collect()
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PanelFocus {
     SessionList,
     Preview,
@@ -71,6 +72,22 @@ pub enum FilterFocus {
 pub enum SortOrder {
     Relevance,
     Newest,
+}
+
+impl SortOrder {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Relevance => Self::Newest,
+            Self::Newest => Self::Relevance,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Relevance => "relevance",
+            Self::Newest => "newest",
+        }
+    }
 }
 
 pub struct App {
@@ -112,6 +129,28 @@ pub struct App {
     pub viewing_search_status: Option<String>,
     pub viewing_sanitized_lines: Vec<Vec<SanitizedLine>>,
     pub viewing_match_cache: Vec<usize>,
+    /// Ratatui list state for the session list. Synced from `selected_index`
+    /// at render time so the viewport auto-follows selection (k9s/htop feel).
+    pub list_state: ratatui::widgets::ListState,
+    /// Last rendered rects for each panel — used by mouse routing so a
+    /// scroll wheel event over the preview pane goes to the preview, not
+    /// the active panel. Updated every frame by the renderer.
+    pub list_rect: Option<ratatui::layout::Rect>,
+    pub preview_rect: Option<ratatui::layout::Rect>,
+    /// User-runtime override for mouse capture. None = follow startup
+    /// default (captured); Some(true) = force-on; Some(false) = off so
+    /// terminal-native text selection works.
+    pub mouse_capture_enabled: bool,
+    /// Indices into `preview_messages` that the user has expanded — long
+    /// messages are otherwise truncated to PREVIEW_COLLAPSED_LINES with a
+    /// "(K more lines)" hint. Cleared whenever a new session is loaded.
+    pub preview_expanded: std::collections::HashSet<usize>,
+    /// Map from `session.id` (the visible row's id) → cluster size. Built
+    /// once per `results` refresh; rows that share a `(cwd, first-line-of-
+    /// title)` key collapse, the most recent survives, and the surviving
+    /// row's id maps to the cluster's total count. Sessions not in a
+    /// cluster have entries with value 1 (or are simply absent).
+    pub cluster_counts: std::collections::HashMap<String, usize>,
 }
 
 impl App {
@@ -153,6 +192,16 @@ impl App {
             background_status,
             semantic_last_refresh: Instant::now(),
             settings_selected: 0,
+            list_state: ratatui::widgets::ListState::default(),
+            list_rect: None,
+            preview_rect: None,
+            // Default OFF so users can drag-select text in the panels
+            // immediately, like claude-history does. Ctrl+M re-enables
+            // mouse nav (click-to-select row, panel-aware scroll) when
+            // needed.
+            mouse_capture_enabled: false,
+            preview_expanded: std::collections::HashSet::new(),
+            cluster_counts: std::collections::HashMap::new(),
             pending_resume: None,
             exec_on_exit: None,
             viewing_search_query: String::new(),
@@ -195,6 +244,80 @@ impl App {
         }
     }
 
+    /// Cluster size for the visible row representing this session id.
+    /// Returns 1 when the session is unique. Computed by `rebuild_clusters`.
+    pub fn cluster_size_for(&self, session_id: &str) -> usize {
+        self.cluster_counts.get(session_id).copied().unwrap_or(1)
+    }
+
+    /// Collapse `results` so rows sharing `(cwd, first-line-of-title)`
+    /// appear once. The most recently-updated session is kept as the
+    /// representative. `cluster_counts[representative.id] = cluster_size`
+    /// drives the ×N badge in the UI.
+    fn rebuild_clusters(&mut self) {
+        use std::collections::HashMap;
+
+        // Single pass: per bucket, remember (survivor_orig_index, total_count).
+        let mut bucket_order: Vec<String> = Vec::new();
+        let mut survivor_of: HashMap<String, usize> = HashMap::new(); // key → orig idx
+        let mut count_of: HashMap<String, usize> = HashMap::new(); // key → cluster size
+
+        for (i, r) in self.results.iter().enumerate() {
+            let key = Self::cluster_key(&r.session);
+            *count_of.entry(key.clone()).or_insert(0) += 1;
+            let cur_ts = r.session.updated_at.unwrap_or(r.session.started_at);
+            match survivor_of.get(&key).copied() {
+                None => {
+                    bucket_order.push(key.clone());
+                    survivor_of.insert(key, i);
+                }
+                Some(prev) => {
+                    let prev_ts = self.results[prev]
+                        .session
+                        .updated_at
+                        .unwrap_or(self.results[prev].session.started_at);
+                    if cur_ts > prev_ts {
+                        survivor_of.insert(key, i);
+                    }
+                }
+            }
+        }
+
+        // Pluck survivors out in bucket-first-seen order, then sort by
+        // updated_at desc so recents float to the top regardless of how
+        // the search engine ordered them.
+        let mut taken: Vec<Option<crate::types::SearchResult>> =
+            self.results.drain(..).map(Some).collect();
+        let mut survivors: Vec<crate::types::SearchResult> = Vec::with_capacity(bucket_order.len());
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for key in &bucket_order {
+            let idx = survivor_of[key];
+            if let Some(r) = taken[idx].take() {
+                counts.insert(r.session.id.clone(), count_of[key]);
+                survivors.push(r);
+            }
+        }
+        survivors.sort_by(|a, b| {
+            let ta = a.session.updated_at.unwrap_or(a.session.started_at);
+            let tb = b.session.updated_at.unwrap_or(b.session.started_at);
+            tb.cmp(&ta)
+        });
+        self.results = survivors;
+        self.cluster_counts = counts;
+    }
+
+    /// Bucket key: (cwd or "<no cwd>") + "::" + first 80 chars of the title
+    /// (which is already the first real user message thanks to JSONL flag
+    /// skipping in the claude_code adapter). Two sessions that share this
+    /// key are visually indistinguishable to the user.
+    fn cluster_key(session: &crate::types::Session) -> String {
+        let cwd = session.directory.as_deref().unwrap_or("<no cwd>");
+        let title_head: String =
+            session.title.chars().filter(|c| !c.is_whitespace() || *c == ' ').take(80).collect();
+        let title_head = title_head.split_whitespace().collect::<Vec<_>>().join(" ");
+        format!("{cwd}::{title_head}")
+    }
+
     pub fn source_label_for<'a>(&'a self, source_id: &'a str) -> &'a str {
         self.all_sources
             .iter()
@@ -211,6 +334,7 @@ impl App {
             .filter(|session| self.session_matches_filters(session, source_ids.as_deref()))
             .map(|session| SearchResult { session, match_source: MatchSource::Fts, snippet: None })
             .collect();
+        self.rebuild_clusters();
         self.selected_index = 0;
         self.panel_focus = PanelFocus::SessionList;
         self.load_preview(store);
@@ -289,6 +413,78 @@ impl App {
         }
     }
 
+    /// Panel-aware mouse scroll. Picks the target panel based on cursor
+    /// position rather than the focused panel — so hovering preview and
+    /// scrolling moves the preview, not the active list.
+    pub fn handle_mouse_scroll(
+        &mut self,
+        dir: crate::tui::event::ScrollDirection,
+        col: u16,
+        row: u16,
+        store: &Store,
+    ) {
+        let in_rect = |r: Option<ratatui::layout::Rect>| -> bool {
+            r.map(|r| col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height)
+                .unwrap_or(false)
+        };
+        let prev_focus = self.panel_focus;
+        // Temporarily switch focus to the panel under the cursor, so the
+        // existing scroll handlers do the right thing. Restore after.
+        let target_focus = if in_rect(self.preview_rect) {
+            PanelFocus::Preview
+        } else if in_rect(self.list_rect) {
+            PanelFocus::SessionList
+        } else {
+            prev_focus
+        };
+        self.panel_focus = target_focus;
+        match dir {
+            crate::tui::event::ScrollDirection::Up => self.handle_scroll_up(store),
+            crate::tui::event::ScrollDirection::Down => self.handle_scroll_down(store),
+        }
+        self.panel_focus = prev_focus;
+    }
+
+    /// Mouse left-click. In the list pane → select the clicked row. In the
+    /// preview pane → focus the preview AND set the message cursor to the
+    /// clicked row when within range.
+    pub fn handle_mouse_click(
+        &mut self,
+        col: u16,
+        row: u16,
+        store: &Store,
+        engine: &crate::db::search::SearchEngine,
+        provider: &mut Option<crate::embedding::EmbeddingProvider>,
+    ) {
+        let _ = (engine, provider);
+        let in_rect = |r: Option<ratatui::layout::Rect>| -> bool {
+            r.map(|r| col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height)
+                .unwrap_or(false)
+        };
+        if in_rect(self.list_rect) && self.mode == AppMode::Search {
+            // Map screen row → list index. Each ListItem spans LIST_LINES_PER_ITEM
+            // terminal rows (header + dimmed snippet), so a click on visual
+            // row R corresponds to item `offset + (R - inner_top) / lines_per_item`.
+            // Without the divide, clicks land roughly twice as far down the list.
+            const LIST_LINES_PER_ITEM: u16 = 2;
+            if let Some(rect) = self.list_rect {
+                let inner_top = rect.y + 1; // border
+                if row >= inner_top {
+                    let row_in_list = (row - inner_top) / LIST_LINES_PER_ITEM;
+                    let offset = self.list_state.offset();
+                    let target = offset + row_in_list as usize;
+                    if target < self.results.len() {
+                        self.panel_focus = PanelFocus::SessionList;
+                        self.selected_index = target;
+                        self.load_preview(store);
+                    }
+                }
+            }
+        } else if in_rect(self.preview_rect) && self.mode == AppMode::Search {
+            self.panel_focus = PanelFocus::Preview;
+        }
+    }
+
     fn handle_search_key(
         &mut self,
         key: KeyEvent,
@@ -302,17 +498,47 @@ impl App {
             return;
         }
 
+        // Ctrl+E toggles expansion of the focused preview message — long
+        // assistant replies otherwise collapse to PREVIEW_COLLAPSED_LINES
+        // with a "(K more lines)" hint. Only meaningful when preview pane
+        // is focused.
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('e')
+            && self.panel_focus == PanelFocus::Preview
+        {
+            let idx = self.preview_selected_msg;
+            if self.preview_expanded.contains(&idx) {
+                self.preview_expanded.remove(&idx);
+            } else {
+                self.preview_expanded.insert(idx);
+            }
+            return;
+        }
+
+        // Ctrl+M toggles mouse capture so the user can drag-select text in
+        // the terminal natively. The main loop reads this flag each frame
+        // and (re)issues EnableMouseCapture / DisableMouseCapture.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('m') {
+            self.mouse_capture_enabled = !self.mouse_capture_enabled;
+            self.status_message = Some(if self.mouse_capture_enabled {
+                "mouse nav ON — click/scroll panes (drag-select disabled). Ctrl+M to toggle."
+                    .to_string()
+            } else {
+                "mouse nav OFF — drag to select text. Ctrl+M to re-enable click/scroll.".to_string()
+            });
+            return;
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
             self.start_resume_confirmation(ResumeOrigin::Search);
             return;
         }
 
         match key.code {
-            KeyCode::Char('q')
-                if self.query.is_empty() && self.panel_focus == PanelFocus::SessionList =>
-            {
-                self.should_quit = true;
-            }
+            // NOTE: `q` is intentionally NOT a quit binding in search mode.
+            // Otherwise typing a query that starts with "q" (e.g. "query",
+            // "queue", "qa") would exit the app on the first keystroke.
+            // Esc handles the empty-query → quit path below.
             KeyCode::Esc => {
                 if self.panel_focus == PanelFocus::Preview {
                     self.panel_focus = PanelFocus::SessionList;
@@ -376,7 +602,15 @@ impl App {
                 self.enter_viewing(store);
             }
             KeyCode::Tab => {
-                self.cycle_filter(store, engine, provider);
+                // Tab toggles which panel has focus (list ↔ preview).
+                // Filter changes live in the Ctrl+S settings popup now —
+                // Tab cycling those was too easy to overshoot.
+                self.panel_focus = match self.panel_focus {
+                    PanelFocus::SessionList => PanelFocus::Preview,
+                    PanelFocus::Preview => PanelFocus::SessionList,
+                };
+                let _ = (engine, provider);
+                let _ = store;
             }
             _ => {}
         }
@@ -643,37 +877,49 @@ impl App {
             return;
         }
 
-        if !self.semantic_ready() {
+        // Mini build: no embedder available, never attempt semantic path.
+        // FTS handles the query fine.
+        #[cfg(not(feature = "semantic-search"))]
+        {
+            let _ = (provider, &self.embedding_init_pending, &self.embedding_unavailable);
             self.run_search(store, engine, None);
             return;
         }
 
-        if provider.is_none() && !self.embedding_init_pending && !self.embedding_unavailable {
-            self.status_message = Some("Loading embedding model...".to_string());
-            self.embedding_init_pending = true;
-            return;
-        }
-        if self.embedding_init_pending {
-            self.embedding_init_pending = false;
-            match EmbeddingProvider::new(false) {
-                Ok(p) => {
-                    *provider = Some(p);
-                    self.embedding_unavailable = false;
-                    self.status_message = None;
-                }
-                Err(_) => {
-                    self.embedding_unavailable = true;
-                    self.status_message =
-                        Some("Semantic unavailable — using text search only".to_string());
+        #[cfg(feature = "semantic-search")]
+        {
+            if !self.semantic_ready() {
+                self.run_search(store, engine, None);
+                return;
+            }
+
+            if provider.is_none() && !self.embedding_init_pending && !self.embedding_unavailable {
+                self.status_message = Some("Loading embedding model...".to_string());
+                self.embedding_init_pending = true;
+                return;
+            }
+            if self.embedding_init_pending {
+                self.embedding_init_pending = false;
+                match EmbeddingProvider::new(false) {
+                    Ok(p) => {
+                        *provider = Some(p);
+                        self.embedding_unavailable = false;
+                        self.status_message = None;
+                    }
+                    Err(_) => {
+                        self.embedding_unavailable = true;
+                        self.status_message =
+                            Some("Semantic unavailable — using text search only".to_string());
+                    }
                 }
             }
-        }
-        let embedding = provider
-            .as_ref()
-            .and_then(|p| p.embed_query(&[query]).ok())
-            .and_then(|mut e| if e.is_empty() { None } else { Some(e.swap_remove(0)) });
+            let embedding = provider
+                .as_ref()
+                .and_then(|p| p.embed_query(&[query]).ok())
+                .and_then(|mut e| if e.is_empty() { None } else { Some(e.swap_remove(0)) });
 
-        self.run_search(store, engine, embedding.as_deref());
+            self.run_search(store, engine, embedding.as_deref());
+        }
     }
 
     fn run_search(&mut self, store: &Store, engine: &SearchEngine, embedding: Option<&[f32]>) {
@@ -689,6 +935,7 @@ impl App {
             Ok(mut results) => {
                 self.apply_sort(&mut results);
                 self.results = results;
+                self.rebuild_clusters();
                 self.selected_index = 0;
                 self.status_message = None;
             }
@@ -702,6 +949,7 @@ impl App {
         self.load_preview(store);
     }
 
+    #[cfg(feature = "semantic-search")]
     fn semantic_ready(&self) -> bool {
         !self.embedding_unavailable
             && (self.semantic_progress.done_sessions > 0
@@ -743,7 +991,7 @@ impl App {
     }
 
     fn settings_row_count(&self) -> usize {
-        1 + self.all_sources.len()
+        2 + self.all_sources.len()
     }
 
     fn update_setting(
@@ -754,7 +1002,9 @@ impl App {
     ) {
         if self.settings_selected == 0 {
             self.config.sync_window = self.config.sync_window.next();
-        } else if let Some((source_id, _)) = self.all_sources.get(self.settings_selected - 1) {
+        } else if self.settings_selected == 1 {
+            self.sort_order = self.sort_order.next();
+        } else if let Some((source_id, _)) = self.all_sources.get(self.settings_selected - 2) {
             if self.config.is_source_enabled(source_id) {
                 let enabled_count =
                     self.all_sources.len().saturating_sub(self.config.disabled_sources.len());
@@ -804,6 +1054,7 @@ impl App {
 
     fn load_preview(&mut self, store: &Store) {
         self.preview_selected_msg = 0;
+        self.preview_expanded.clear();
         if let Some(result) = self.results.get(self.selected_index) {
             match store.get_messages(&result.session.id) {
                 Ok(msgs) => {
@@ -980,44 +1231,6 @@ impl App {
     fn apply_sort(&self, results: &mut [SearchResult]) {
         if self.sort_order == SortOrder::Newest {
             results.sort_by_key(|b| std::cmp::Reverse(b.session.started_at));
-        }
-    }
-
-    fn cycle_filter(
-        &mut self,
-        store: &Store,
-        engine: &SearchEngine,
-        provider: &mut Option<EmbeddingProvider>,
-    ) {
-        match self.filter_focus {
-            FilterFocus::Source => {
-                self.source_filter_index =
-                    (self.source_filter_index + 1) % (self.enabled_sources().len() + 1);
-                self.filter_focus = FilterFocus::Time;
-            }
-            FilterFocus::Time => {
-                self.time_filter = match self.time_filter {
-                    TimeRange::All => TimeRange::Today,
-                    TimeRange::Today => TimeRange::Week,
-                    TimeRange::Week => TimeRange::Month,
-                    TimeRange::Month => TimeRange::All,
-                };
-                self.filter_focus = FilterFocus::Sort;
-            }
-            FilterFocus::Sort => {
-                self.sort_order = match self.sort_order {
-                    SortOrder::Relevance => SortOrder::Newest,
-                    SortOrder::Newest => SortOrder::Relevance,
-                };
-                self.filter_focus = FilterFocus::Source;
-            }
-        }
-        if !self.query.is_empty() {
-            self.update_scope_metrics(store);
-            self.do_search(store, engine, provider);
-        } else {
-            self.update_scope_metrics(store);
-            self.load_recent(store);
         }
     }
 }
