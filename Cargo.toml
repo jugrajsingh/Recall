@@ -20,6 +20,8 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2"
+globset = "0.4"
+libc = "0.2"
 uuid = { version = "1", features = ["v4"] }
 ratatui = "0.29"
 crossterm = "0.28"
@@ -37,7 +39,12 @@ candle-nn = "0.10"
 candle-transformers = "0.10"
 
 [features]
-default = []
+# default = mini build (FTS-only). Enable semantic-search for hybrid retrieval.
+# NOTE: dependency-level gating of candle/hf-hub/sqlite-vec/tokenizers is still
+# in flight — see FORK_PATCHES.md "Phase 3 follow-up". For now both feature
+# settings build the same binary; the difference is reported by `recall info`.
+default = ["semantic-search"]
+semantic-search = []
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 
 [profile.release]
