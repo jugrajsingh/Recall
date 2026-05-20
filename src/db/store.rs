@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use chrono::Utc;
@@ -54,6 +55,76 @@ impl Store {
         }
     }
 
+    /// Drop every row from every session-related table. Schema (tables,
+    /// indexes, FTS, vec) is preserved so the next sync can re-populate
+    /// without a migration. Background job state is also cleared.
+    pub fn reset_all_data(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "BEGIN;
+             DELETE FROM message_vec;
+             DELETE FROM messages_fts;
+             DELETE FROM session_embedding_state;
+             DELETE FROM messages;
+             DELETE FROM sessions;
+             DELETE FROM background_job_state;
+             COMMIT;",
+        )?;
+        Ok(())
+    }
+
+    /// Drop the semantic queue and any vector embeddings. FTS / sessions /
+    /// messages are kept intact. Returns the number of session-embedding
+    /// rows that were removed (rough indication of work cleared).
+    pub fn clear_semantic_queue(&self) -> Result<usize> {
+        let count: usize = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM session_embedding_state", [], |r| r.get(0))
+            .unwrap_or(0);
+        self.conn.execute_batch(
+            "BEGIN;
+             DELETE FROM message_vec;
+             DELETE FROM session_embedding_state;
+             COMMIT;",
+        )?;
+        Ok(count)
+    }
+
+    /// VACUUM + ANALYZE. Returns (bytes_before, bytes_after) from the
+    /// database file size for reporting.
+    pub fn vacuum(&self) -> Result<(u64, u64)> {
+        let db_path = Self::db_path()?;
+        let before = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+        self.conn.execute("VACUUM", [])?;
+        self.conn.execute("ANALYZE", [])?;
+        let after = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+        Ok((before, after))
+    }
+
+    /// Resolved on-disk path of the recall.db file.
+    pub fn db_path() -> Result<PathBuf> {
+        let dir =
+            dirs::data_dir().ok_or_else(|| anyhow::anyhow!("cannot determine data directory"))?;
+        Ok(dir.join("recall.db"))
+    }
+
+    /// Return every (source, source_id, directory) so the sync pipeline can
+    /// evaluate exclusion rules against rows that are already in the DB —
+    /// even if the underlying file is mtime-skipped by incremental sync.
+    /// Used by the pre-sync prune pass.
+    pub fn all_session_paths(&self) -> Result<Vec<(String, String, Option<String>)>> {
+        let mut stmt = self.conn.prepare("SELECT source, source_id, directory FROM sessions")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn session_meta_map(&self, source: &str) -> Result<HashMap<String, (Option<i64>, u32)>> {
         let mut stmt = self.conn.prepare(
             "SELECT source_id, updated_at, message_count FROM sessions WHERE source = ?1",
@@ -66,8 +137,8 @@ impl Store {
 
     pub fn insert_session(&self, session: &Session) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO sessions (id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT OR REPLACE INTO sessions (id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint, custom_title, summary, duration_minutes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             rusqlite::params![
                 session.id,
                 session.source,
@@ -78,6 +149,9 @@ impl Store {
                 session.updated_at,
                 session.message_count,
                 session.entrypoint,
+                session.custom_title,
+                session.summary,
+                session.duration_minutes,
             ],
         )?;
         Ok(())
@@ -108,8 +182,8 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         {
             tx.execute(
-                "INSERT OR REPLACE INTO sessions (id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT OR REPLACE INTO sessions (id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint, custom_title, summary, duration_minutes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 rusqlite::params![
                     session.id,
                     session.source,
@@ -120,6 +194,9 @@ impl Store {
                     session.updated_at,
                     session.message_count,
                     session.entrypoint,
+                    session.custom_title,
+                    session.summary,
+                    session.duration_minutes,
                 ],
             )?;
 
@@ -139,15 +216,15 @@ impl Store {
                 }
             }
 
-            let units_total: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM messages
-                 WHERE session_id = ?1 AND role = 'user' AND LENGTH(content) > 2",
-                rusqlite::params![session.id],
-                |row| row.get(0),
-            )?;
-
+            // Semantic queue bookkeeping. In mini builds there's no
+            // embedder to drain the queue — so we mark every persisted
+            // session as 'done' rather than 'pending'. That keeps the
+            // status bar honest (no "[semantic 0/N]" indicator growing
+            // forever) and lets a later full-build install run `recall
+            // reembed` to flip everything back to pending.
             let now = Utc::now().timestamp_millis();
-            if units_total == 0 {
+            #[cfg(not(feature = "semantic-search"))]
+            {
                 tx.execute(
                     "INSERT INTO session_embedding_state (session_id, status, units_total, units_done, finished_at, last_error)
                      VALUES (?1, 'done', 0, 0, ?2, NULL)
@@ -160,19 +237,43 @@ impl Store {
                         last_error = NULL",
                     rusqlite::params![session.id, now],
                 )?;
-            } else {
-                tx.execute(
-                    "INSERT INTO session_embedding_state (session_id, status, units_total, units_done, started_at, finished_at, last_error)
-                     VALUES (?1, 'pending', ?2, 0, NULL, NULL, NULL)
-                     ON CONFLICT(session_id) DO UPDATE SET
-                        status = 'pending',
-                        units_total = excluded.units_total,
-                        units_done = 0,
-                        started_at = NULL,
-                        finished_at = NULL,
-                        last_error = NULL",
-                    rusqlite::params![session.id, units_total],
+            }
+            #[cfg(feature = "semantic-search")]
+            {
+                let units_total: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM messages
+                     WHERE session_id = ?1 AND role = 'user' AND LENGTH(content) > 2",
+                    rusqlite::params![session.id],
+                    |row| row.get(0),
                 )?;
+
+                if units_total == 0 {
+                    tx.execute(
+                        "INSERT INTO session_embedding_state (session_id, status, units_total, units_done, finished_at, last_error)
+                         VALUES (?1, 'done', 0, 0, ?2, NULL)
+                         ON CONFLICT(session_id) DO UPDATE SET
+                            status = 'done',
+                            units_total = 0,
+                            units_done = 0,
+                            started_at = NULL,
+                            finished_at = excluded.finished_at,
+                            last_error = NULL",
+                        rusqlite::params![session.id, now],
+                    )?;
+                } else {
+                    tx.execute(
+                        "INSERT INTO session_embedding_state (session_id, status, units_total, units_done, started_at, finished_at, last_error)
+                         VALUES (?1, 'pending', ?2, 0, NULL, NULL, NULL)
+                         ON CONFLICT(session_id) DO UPDATE SET
+                            status = 'pending',
+                            units_total = excluded.units_total,
+                            units_done = 0,
+                            started_at = NULL,
+                            finished_at = NULL,
+                            last_error = NULL",
+                        rusqlite::params![session.id, units_total],
+                    )?;
+                }
             }
         }
         tx.commit()?;
@@ -569,7 +670,8 @@ impl Store {
 
     pub fn list_recent_sessions(&self, limit: usize) -> Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint
+            "SELECT id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint,
+                    custom_title, summary, duration_minutes
              FROM sessions ORDER BY started_at DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
@@ -583,6 +685,9 @@ impl Store {
                 updated_at: row.get(6)?,
                 message_count: row.get(7)?,
                 entrypoint: row.get(8)?,
+                custom_title: row.get(9).ok().flatten(),
+                summary: row.get(10).ok().flatten(),
+                duration_minutes: row.get(11).ok().flatten(),
             })
         })?;
         let mut sessions = Vec::new();

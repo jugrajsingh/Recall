@@ -42,6 +42,20 @@ where
         }
     }
 
+    // In mini builds (no semantic-search feature), the worker exists only
+    // to run the initial sync. The embedding loop below is skipped — no
+    // CPU spent on local model inference, no model download.
+    #[cfg(not(feature = "semantic-search"))]
+    {
+        store.set_background_job_state(
+            BACKGROUND_JOB,
+            "idle",
+            Some("recall-mini: semantic disabled"),
+        )?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
     let provider = match EmbeddingProvider::new(false) {
         Ok(provider) => provider,
         Err(err) => {
@@ -134,7 +148,38 @@ fn try_acquire_worker_lock() -> Result<Option<File>> {
     }
 }
 
-fn worker_lock_path() -> Result<std::path::PathBuf> {
+pub fn worker_lock_path() -> Result<std::path::PathBuf> {
     let dir = dirs::data_dir().ok_or_else(|| anyhow::anyhow!("cannot determine data directory"))?;
     Ok(dir.join("recall").join("background-worker.lock"))
+}
+
+/// Read the PID written into the worker lock file by the running worker.
+/// Returns `Ok(None)` if the file doesn't exist or is empty.
+pub fn worker_lock_pid() -> Result<Option<u32>> {
+    let path = worker_lock_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let pid = content.trim().parse::<u32>().ok();
+    Ok(pid)
+}
+
+/// True when an exclusive lock cannot be acquired right now — i.e. some
+/// other process is holding the worker lock. Distinguishes "lock file
+/// exists with stale PID" from "lock is actively held".
+pub fn worker_lock_is_held() -> Result<bool> {
+    let path = worker_lock_path()?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let file = OpenOptions::new().read(true).write(true).open(&path)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            // We just acquired it; nobody else has it.
+            let _ = FileExt::unlock(&file);
+            Ok(false)
+        }
+        Err(_) => Ok(true),
+    }
 }

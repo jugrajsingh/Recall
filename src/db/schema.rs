@@ -22,12 +22,18 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
             updated_at INTEGER,
             message_count INTEGER NOT NULL DEFAULT 0,
             entrypoint TEXT,
+            custom_title TEXT,
+            summary TEXT,
+            duration_minutes INTEGER,
             UNIQUE(source, source_id)
         );
 
         CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
         CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
         CREATE INDEX IF NOT EXISTS idx_sessions_directory ON sessions(directory);
+
+        -- Idempotent additive migrations for older DBs (no-op on fresh DBs).
+        -- SQLite has no IF NOT EXISTS for columns; we ignore the error.
 
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,5 +87,17 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
         );
         ",
     )?;
+
+    // Additive migrations for the sessions table. Older DBs created before
+    // we added these columns need them backfilled. Ignore errors since
+    // each statement is run-once and fails harmlessly on second invocation.
+    for stmt in [
+        "ALTER TABLE sessions ADD COLUMN custom_title TEXT",
+        "ALTER TABLE sessions ADD COLUMN summary TEXT",
+        "ALTER TABLE sessions ADD COLUMN duration_minutes INTEGER",
+    ] {
+        let _ = conn.execute(stmt, []);
+    }
+
     Ok(())
 }
