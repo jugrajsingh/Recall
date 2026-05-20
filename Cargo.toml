@@ -10,8 +10,6 @@ repository = "https://github.com/samzong/Recall"
 clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 sqlite-vec = "0.1"
-hf-hub = { version = "0.5", features = ["ureq"] }
-tokenizers = { version = "0.22", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
@@ -31,24 +29,52 @@ crossterm = "0.28"
 unicode-width = "0.2"
 fs2 = "0.4"
 
+# ---- Embedding-backend deps. All optional; one of `semantic-fastembed` or
+# `semantic-candle` must be enabled to build the semantic path. -------------
+hf-hub = { version = "0.5", features = ["ureq"], optional = true }
+tokenizers = { version = "0.22", default-features = false, optional = true }
+fastembed = { version = "5.13", default-features = false, features = [
+    "hf-hub-rustls-tls",
+    "ort-download-binaries-rustls-tls",
+], optional = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
-candle-core = { version = "0.10", features = ["metal"] }
-candle-nn = { version = "0.10", features = ["metal"] }
-candle-transformers = { version = "0.10", features = ["metal"] }
+candle-core = { version = "0.10", features = ["metal"], optional = true }
+candle-nn = { version = "0.10", features = ["metal"], optional = true }
+candle-transformers = { version = "0.10", features = ["metal"], optional = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-candle-core = "0.10"
-candle-nn = "0.10"
-candle-transformers = "0.10"
+candle-core = { version = "0.10", optional = true }
+candle-nn = { version = "0.10", optional = true }
+candle-transformers = { version = "0.10", optional = true }
 
 [features]
-# default = mini build (FTS-only). Enable semantic-search for hybrid retrieval.
-# NOTE: dependency-level gating of candle/hf-hub/sqlite-vec/tokenizers is still
-# in flight — see FORK_PATCHES.md "Phase 3 follow-up". For now both feature
-# settings build the same binary; the difference is reported by `recall info`.
-default = ["semantic-search"]
+# Default: full build using fastembed (lightweight, ONNX, no openssl chain).
+default = ["semantic-search", "semantic-fastembed"]
+
+# `semantic-search` is a marker — turns on the queue worker, status indicator,
+# `reembed` subcommand, etc. It does NOT pull any backend deps on its own.
+# Pair it with exactly ONE of the impl features below.
 semantic-search = []
-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+
+# Backend implementations. Mutually exclusive at runtime (the cfg-selector in
+# src/embedding/mod.rs picks one). If both are set, fastembed wins.
+semantic-fastembed = ["dep:fastembed"]
+semantic-candle = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:hf-hub",
+    "dep:tokenizers",
+]
+
+# GPU acceleration for the candle backend.
+cuda = [
+    "semantic-candle",
+    "candle-core/cuda",
+    "candle-nn/cuda",
+    "candle-transformers/cuda",
+]
 
 [profile.release]
 opt-level = 3

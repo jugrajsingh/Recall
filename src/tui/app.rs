@@ -524,7 +524,11 @@ impl App {
                 "mouse nav ON — click/scroll panes (drag-select disabled). Ctrl+M to toggle."
                     .to_string()
             } else {
-                "mouse nav OFF — drag to select text. Ctrl+M to re-enable click/scroll.".to_string()
+                // Alt+drag does rectangular (column-bounded) selection on
+                // most modern terminals — dragging within one panel's
+                // columns naturally bounds the selection to that panel.
+                "mouse nav OFF — drag to select (Alt+drag for panel-bounded). Ctrl+M to re-enable."
+                    .to_string()
             });
             return;
         }

@@ -321,10 +321,13 @@ fn cmd_info() -> Result<()> {
     // mini (FTS-only) or full (semantic) binary.
     println!();
     println!("Build");
-    #[cfg(feature = "semantic-search")]
-    println!("  Variant     recall-full (semantic-search enabled)");
+    // Report the actual backend in use, not just "semantic-search on".
+    #[cfg(feature = "semantic-fastembed")]
+    println!("  Variant     recall-fastembed (FTS5 + ONNX semantic via fastembed)");
+    #[cfg(all(feature = "semantic-candle", not(feature = "semantic-fastembed")))]
+    println!("  Variant     recall-candle (FTS5 + candle semantic, Metal/CUDA-capable)");
     #[cfg(not(feature = "semantic-search"))]
-    println!("  Variant     recall-mini (FTS only)");
+    println!("  Variant     recall-mini (FTS5 only)");
     println!("  Version     {}", env!("CARGO_PKG_VERSION"));
 
     println!();

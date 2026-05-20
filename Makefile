@@ -21,18 +21,45 @@ release-mini: ## Release build — FTS-only, no semantic search
 	$(CARGO) build --release --no-default-features
 	@printf '\n$(GREEN)  ✓ recall-mini built$(RESET)  ./target/release/recall\n\n'
 
-release-full: ## Release build — hybrid FTS + semantic
-	$(CARGO) build --release --features semantic-search
-	@printf '\n$(GREEN)  ✓ recall-full built$(RESET)  ./target/release/recall\n\n'
+release-full: ## Release build — hybrid FTS + semantic (fastembed, default)
+	$(CARGO) build --release
+	@printf '\n$(GREEN)  ✓ recall-full (fastembed) built$(RESET)  ./target/release/recall\n\n'
 
-install-mini: release-mini ## Build mini + install to ~/.cargo/bin/recall
-	@install -m 755 ./target/release/recall $$HOME/.cargo/bin/recall
-	@printf '$(GREEN)  installed recall-mini to ~/.cargo/bin/recall$(RESET)\n'
-	@$$HOME/.cargo/bin/recall info | grep -E "Variant|Version" || true
+release-candle: ## Release build — hybrid FTS + semantic (candle backend, Metal/CUDA-capable)
+	$(CARGO) build --release --no-default-features --features semantic-search,semantic-candle
+	@printf '\n$(GREEN)  ✓ recall-full (candle) built$(RESET)  ./target/release/recall\n\n'
 
-install-full: release-full ## Build full + install to ~/.cargo/bin/recall
+# Each install target ships a DISTINCTLY-NAMED binary so the user can keep
+# all three available side-by-side and pick per-invocation:
+#   recall-mini       # FTS only
+#   recall-fastembed  # hybrid via ONNX (no openssl)
+#   recall-candle     # hybrid via candle (Metal/CUDA)
+# Symlink whichever you use most as `recall` if you want a default.
+
+install-mini: release-mini ## Build + install to ~/.cargo/bin/recall-mini
+	@install -m 755 ./target/release/recall $$HOME/.cargo/bin/recall-mini
+	@printf '$(GREEN)  installed $$HOME/.cargo/bin/recall-mini$(RESET)\n'
+	@$$HOME/.cargo/bin/recall-mini info | grep -E "Variant|Version" || true
+
+install-fastembed: release-full ## Build + install to ~/.cargo/bin/recall-fastembed
+	@install -m 755 ./target/release/recall $$HOME/.cargo/bin/recall-fastembed
+	@printf '$(GREEN)  installed $$HOME/.cargo/bin/recall-fastembed$(RESET)\n'
+	@$$HOME/.cargo/bin/recall-fastembed info | grep -E "Variant|Version" || true
+
+install-candle: release-candle ## Build + install to ~/.cargo/bin/recall-candle
+	@install -m 755 ./target/release/recall $$HOME/.cargo/bin/recall-candle
+	@printf '$(GREEN)  installed $$HOME/.cargo/bin/recall-candle$(RESET)\n'
+	@$$HOME/.cargo/bin/recall-candle info | grep -E "Variant|Version" || true
+
+install-all: install-mini install-fastembed install-candle ## Build + install all 3 variants
+	@printf '\n$(GREEN)  All three variants installed.$(RESET)\n'
+	@printf '  Symlink your default: ln -sf $$HOME/.cargo/bin/recall-fastembed $$HOME/.cargo/bin/recall\n'
+
+# Legacy alias — kept so older docs/scripts still work; installs the full
+# (fastembed) build to ~/.cargo/bin/recall.
+install-full: release-full ## (deprecated) Build full + install as plain `recall`
 	@install -m 755 ./target/release/recall $$HOME/.cargo/bin/recall
-	@printf '$(GREEN)  installed recall-full to ~/.cargo/bin/recall$(RESET)\n'
+	@printf '$(GREEN)  installed $$HOME/.cargo/bin/recall (fastembed full)$(RESET)\n'
 	@$$HOME/.cargo/bin/recall info | grep -E "Variant|Version" || true
 
 # ── Quality ──────────────────────────────────────────────────────────────────
