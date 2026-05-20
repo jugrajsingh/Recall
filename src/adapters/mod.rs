@@ -35,6 +35,18 @@ pub struct RawSession {
     pub updated_at: Option<i64>,
     pub entrypoint: Option<String>,
     pub messages: Vec<RawMessage>,
+    /// Absolute path of the on-disk source file for this session, when known.
+    /// Used by path-exclusion to match sessions that have no `cwd` in their
+    /// JSONL header (e.g. claude-mem observer sessions). Display layer
+    /// ignores this field.
+    pub source_file_path: Option<String>,
+    /// Claude `/rename` value (`type=custom-title` JSONL events). Stronger
+    /// signal than any derived label.
+    pub custom_title: Option<String>,
+    /// Claude auto-generated session summary (`type=summary` events).
+    pub summary: Option<String>,
+    /// First→last message timestamp span in minutes, when computable.
+    pub duration_minutes: Option<u32>,
 }
 
 pub struct RawMessage {
@@ -47,6 +59,7 @@ pub struct RawMessage {
 pub struct SyncScanStats {
     pub skipped_sessions: u32,
     pub filtered_sessions: u32,
+    pub excluded_sessions: u32,
 }
 
 pub struct SyncScanResult {

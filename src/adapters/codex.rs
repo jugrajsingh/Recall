@@ -246,6 +246,10 @@ fn parse_codex_session(path: &Path) -> anyhow::Result<Option<RawSession>> {
         updated_at: messages.last().and_then(|m| m.timestamp),
         entrypoint: None,
         messages,
+        source_file_path: None,
+        custom_title: None,
+        summary: None,
+        duration_minutes: None,
     }))
 }
 

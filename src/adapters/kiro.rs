@@ -139,6 +139,10 @@ pub fn parse_kiro_conversation(
         updated_at: Some(updated_at),
         entrypoint: None,
         messages,
+        source_file_path: None,
+        custom_title: None,
+        summary: None,
+        duration_minutes: None,
     }))
 }
 

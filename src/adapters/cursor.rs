@@ -182,6 +182,10 @@ fn parse_cursor_session(path: &Path) -> anyhow::Result<Option<RawSession>> {
         updated_at: None,
         entrypoint: None,
         messages,
+        source_file_path: None,
+        custom_title: None,
+        summary: None,
+        duration_minutes: None,
     }))
 }
 

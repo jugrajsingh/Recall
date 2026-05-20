@@ -36,6 +36,16 @@ pub struct Session {
     pub updated_at: Option<i64>,
     pub message_count: u32,
     pub entrypoint: Option<String>,
+    /// Claude `/rename` output — `{"type":"custom-title","customTitle":"..."}`
+    /// in the JSONL. Strongest signal for "what this conversation is called".
+    /// (Ported from claude-history.)
+    pub custom_title: Option<String>,
+    /// Claude auto-generated 1-line summary — `{"type":"summary","summary":"..."}`
+    /// in the JSONL. Secondary fallback for the list label.
+    pub summary: Option<String>,
+    /// Duration in minutes between first and last message timestamps.
+    /// None when timestamps were missing or only one message exists.
+    pub duration_minutes: Option<u32>,
 }
 
 #[derive(Debug, Clone)]

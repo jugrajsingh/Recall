@@ -248,6 +248,10 @@ fn parse_antigravity_transcript_reader<R: BufRead>(
         updated_at: messages.last().and_then(|message| message.timestamp),
         entrypoint: None,
         messages,
+        source_file_path: None,
+        custom_title: None,
+        summary: None,
+        duration_minutes: None,
     }))
 }
 

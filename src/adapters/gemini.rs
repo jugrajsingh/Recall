@@ -142,6 +142,10 @@ fn parse_gemini_session_value(doc: Value, fallback_id: &str) -> anyhow::Result<O
         updated_at,
         entrypoint: None,
         messages,
+        source_file_path: None,
+        custom_title: None,
+        summary: None,
+        duration_minutes: None,
     }))
 }
 

@@ -92,6 +92,9 @@ mod tests {
             updated_at,
             message_count,
             entrypoint: None,
+            custom_title: None,
+            summary: None,
+            duration_minutes: None,
         }
     }
 
@@ -115,6 +118,10 @@ mod tests {
                 content: "hi".to_string(),
                 timestamp: Some(mtime_ms),
             }],
+            source_file_path: None,
+            custom_title: None,
+            summary: None,
+            duration_minutes: None,
         }
     }
 

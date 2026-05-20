@@ -198,6 +198,10 @@ fn scan_session_messages(
             updated_at: session.time_updated,
             entrypoint: None,
             messages,
+            source_file_path: None,
+            custom_title: None,
+            summary: None,
+            duration_minutes: None,
         });
     }
 
