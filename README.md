@@ -4,11 +4,7 @@
 
 [![Recall TUI](recall.png)](https://asciinema.org/a/909453)
 
-You bounce between Claude Code, Codex, Copilot CLI, Cline, and whatever comes next. Each tool keeps its own sessions in its own place, in its own format. Recall pulls them all into one local index you can actually search — and drops you right back into any session in its original CLI.
-
-## Architecture
-
-![Recall Architecture](docs/architecture.png)
+Jump between Claude Code, Codex, and whatever comes next; Recall pulls those scattered local sessions into one searchable index, tracks usage when token metadata is available, and drops you back into the original CLI.
 
 ## Install
 
@@ -22,18 +18,18 @@ make install # clone
 
 One index across every AI coding CLI. Sync once, search everywhere, resume right where you left off.
 
-| Adapter         | Discovery | Full index | Incremental sync | Keyword search | Semantic search | Source filter | Time filter | Session search | Copy message | Markdown export | Resume |
-| --------------- | :-------: | :--------: | :--------------: | :------------: | :-------------: | :-----------: | :---------: | :------------: | :----------: | :-------------: | :----: |
-| Claude Code     |     ✅    |     ✅     |        ✅        |       ✅       |        ✅       |       ✅      |      ✅     |       ✅       |      ✅      |        ✅       |   ✅   |
-| OpenCode        |     ✅    |     ✅     |        ✅        |       ✅       |        ✅       |       ✅      |      ✅     |       ✅       |      ✅      |        ✅       |   ✅   |
-| Codex           |     ✅    |     ✅     |        ✅        |       ✅       |        ✅       |       ✅      |      ✅     |       ✅       |      ✅      |        ✅       |   ✅   |
-| Pi              |     ✅    |     ✅     |        ✅        |       ✅       |        ✅       |       ✅      |      ✅     |       ✅       |      ✅      |        ✅       |   ✅   |
-| Antigravity CLI |     ✅    |     ✅     |        ✅        |       ✅       |        ✅       |       ✅      |      ✅     |       ✅       |      ✅      |        ✅       |   ✅   |
-| Gemini          |     ✅    |     ✅     |        ✅        |       ✅       |        ✅       |       ✅      |      ✅     |       ✅       |      ✅      |        ✅       |   ✅   |
-| Kiro            |     ✅    |     ✅     |        ✅        |       ✅       |        ✅       |       ✅      |      ✅     |       ✅       |      ✅      |        ✅       |   —    |
-| Copilot CLI     |     ✅    |     ✅     |        ✅        |       ✅       |        ✅       |       ✅      |      ✅     |       ✅       |      ✅      |        ✅       |   ✅   |
-| Cursor          |     ✅    |     ✅     |        ✅        |       ✅       |        ✅       |       ✅      |      ✅     |       ✅       |      ✅      |        ✅       |   —    |
-| Cline           |     ✅    |     ✅     |        ✅        |       ✅       |        ✅       |       ✅      |      ✅     |       ✅       |      ✅      |        ✅       |   —    |
+| Adapter         | Discovery | Full-index | Incremental-sync | Semantic-search | Export | Resume | Usage |
+| --------------- | :-------: | :--------: | :--------------: | :-------------: | :-------------: | :----: | :----: |
+| Claude Code     |     ✅    |     ✅     |        ✅        |        ✅       |        ✅       |   ✅   |   ✅   |
+| OpenCode        |     ✅    |     ✅     |        ✅        |        ✅       |        ✅       |   ✅   |   ✅   |
+| Codex           |     ✅    |     ✅     |        ✅        |        ✅       |        ✅       |   ✅   |   ✅   |
+| Pi              |     ✅    |     ✅     |        ✅        |        ✅       |        ✅       |   ✅   |   ✅   |
+| Antigravity CLI |     ✅    |     ✅     |        ✅        |        ✅       |        ✅       |   ✅   |      |
+| Gemini          |     ✅    |     ✅     |        ✅        |        ✅       |        ✅       |   ✅   |      |
+| Kiro            |     ✅    |     ✅     |        ✅        |        ✅       |        ✅       |   —    |       |
+| Copilot CLI     |     ✅    |     ✅     |        ✅        |        ✅       |        ✅       |   ✅   |      |
+| Cursor          |     ✅    |     ✅     |        ✅        |        ✅       |        ✅       |   —    |       |
+| Cline           |     ✅    |     ✅     |        ✅        |        ✅       |        ✅       |   —    |       |
 
 ## Usage
 
@@ -42,6 +38,8 @@ recall sync          # incremental sync (safe to run anytime)
 recall sync --force  # reprocess every session (after changing embedding model)
 recall               # launch TUI
 recall search Q      # one-shot CLI search
+recall usage         # usage dashboard
+recall usage --json  # usage report for scripts
 recall info          # index stats and worker status
 ```
 
