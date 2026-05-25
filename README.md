@@ -2,7 +2,7 @@
 
 > Local-first search across every AI coding session on your machine.
 
-[![Recall TUI](recall.png)](https://asciinema.org/a/909453)
+[![Recall TUI](docs/recall.png)](https://asciinema.org/a/909453)
 
 Jump between Claude Code, Codex, and whatever comes next; Recall pulls those scattered local sessions into one searchable index, tracks usage when token metadata is available, and drops you back into the original CLI.
 
