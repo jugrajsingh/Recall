@@ -381,6 +381,9 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
     let mut config = AppConfig::load_or_default();
     config.normalize_sources(&labels);
     let since_ts = if options.usage_only { None } else { config.sync_window.to_since_cutoff() };
+    // Single matcher across all adapters. None when no rules configured —
+    // costs nothing at the loop check site.
+    let path_excluder = config.build_path_excluder()?;
 
     let mut new_sessions = 0u32;
     let mut updated_sessions = 0u32;
@@ -388,6 +391,7 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
     let mut total_messages = 0u32;
     let mut skipped = 0u32;
     let mut filtered_out = 0u32;
+    let mut excluded_out = 0u32;
 
     for adapter in &all {
         let source_id = adapter.id();
@@ -470,6 +474,19 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
                     filtered_out += 1;
                     continue;
                 }
+            }
+
+            // Drop sessions whose cwd matches any excluded_paths glob.
+            // Sessions with no `directory` (e.g. observer-style sessions
+            // identified only by file path) can't be matched here; once a
+            // `source_file_path` field lands on RawSession, extend this
+            // arm to also test against it.
+            if let Some(matcher) = &path_excluder
+                && let Some(dir) = raw.directory.as_deref()
+                && matcher.is_match(dir)
+            {
+                excluded_out += 1;
+                continue;
             }
 
             let raw_source_id = raw.source_id.clone();
@@ -644,6 +661,9 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
         }
         if filtered_out > 0 {
             print!(", {filtered_out} outside configured time scope");
+        }
+        if excluded_out > 0 {
+            print!(", {excluded_out} excluded by excluded_paths");
         }
         println!();
         println!(

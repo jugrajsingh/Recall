@@ -97,6 +97,10 @@ pub struct RawMessage {
 pub struct SyncScanStats {
     pub skipped_sessions: u32,
     pub filtered_sessions: u32,
+    /// Sessions dropped because their `directory` matched an
+    /// `excluded_paths` glob. Aggregated from per-adapter scans and
+    /// surfaced in the verbose sync summary.
+    pub excluded_sessions: u32,
 }
 
 pub struct SyncScanResult {

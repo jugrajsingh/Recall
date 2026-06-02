@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::db::search::TimeRange;
@@ -61,6 +62,12 @@ pub struct AppConfig {
     legacy_enabled_sources: Vec<String>,
     #[serde(default)]
     pub sync_window: SyncWindow,
+    /// Glob patterns matched against each session's `directory` (cwd) field.
+    /// Sessions whose cwd matches ANY glob are dropped at sync time — they
+    /// never enter the FTS or vector index. Edit via the config file.
+    /// Examples: `**/.claude-mem/observer-sessions/**`, `**/tmp/scratch-*/**`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_paths: Vec<String>,
 }
 
 impl AppConfig {
@@ -103,6 +110,23 @@ impl AppConfig {
 
     pub fn is_source_enabled(&self, source_id: &str) -> bool {
         !self.disabled_sources.iter().any(|id| id == source_id)
+    }
+
+    /// Compile the `excluded_paths` globs into a single `GlobSet` matcher.
+    /// Returns `None` when no rules are configured. Errors propagate so an
+    /// invalid pattern fails loud — the user gets a startup error, not a
+    /// silent half-applied filter.
+    pub fn build_path_excluder(&self) -> Result<Option<GlobSet>> {
+        if self.excluded_paths.is_empty() {
+            return Ok(None);
+        }
+        let mut builder = GlobSetBuilder::new();
+        for pat in &self.excluded_paths {
+            let glob =
+                Glob::new(pat).with_context(|| format!("invalid excluded_paths glob: {pat}"))?;
+            builder.add(glob);
+        }
+        Ok(Some(builder.build()?))
     }
 }
 
