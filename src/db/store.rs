@@ -1392,10 +1392,8 @@ mod exclusion_tests {
 
         let paths = store.all_session_paths().unwrap();
         assert_eq!(paths.len(), 2);
-        let observer = paths
-            .iter()
-            .find(|(_, sid, _)| sid == "src-b")
-            .expect("observer session present");
+        let observer =
+            paths.iter().find(|(_, sid, _)| sid == "src-b").expect("observer session present");
         assert_eq!(observer.2.as_deref(), Some("/home/u/.claude-mem/observer-sessions/x"));
 
         // Simulate the pre-sync purge of the excluded row.
