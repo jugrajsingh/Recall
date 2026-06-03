@@ -65,7 +65,11 @@ pub struct AppConfig {
     /// Glob patterns matched against each session's `directory` (cwd) field.
     /// Sessions whose cwd matches ANY glob are dropped at sync time — they
     /// never enter the FTS or vector index. Edit via the config file.
-    /// Examples: `**/.claude-mem/observer-sessions/**`, `**/tmp/scratch-*/**`.
+    ///
+    /// The pattern matches the cwd itself, so to exclude a directory use a
+    /// trailing-`**`-free pattern (a `dir/**` glob matches only its
+    /// children, not `dir`). Examples: `**/observer-sessions`,
+    /// `**/.claude-mem/**`, `**/scratch-*`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_paths: Vec<String>,
 }
