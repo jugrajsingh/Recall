@@ -485,6 +485,14 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
                 && let Some(dir) = raw.directory.as_deref()
                 && matcher.is_match(dir)
             {
+                // If the user added a rule after this session was already
+                // indexed, purge the stale rows so excluded content stops
+                // being searchable — otherwise it lingers until a full reset.
+                if existing_meta.remove(&raw.source_id).is_some() {
+                    store.delete_session_data(source_id, &raw.source_id)?;
+                    existing_usage_meta.remove(&raw.source_id);
+                    existing_event_meta.remove(&raw.source_id);
+                }
                 excluded_out += 1;
                 continue;
             }
