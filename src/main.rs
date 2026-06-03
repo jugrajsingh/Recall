@@ -393,27 +393,17 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
     let mut filtered_out = 0u32;
     let mut excluded_out = 0u32;
 
-    // Pre-sync purge: drop any already-indexed session whose directory now
-    // matches an excluded_paths rule. This must run BEFORE the per-adapter
-    // scan because incremental sync skips unchanged sessions entirely — so
-    // a session indexed before the rule was added would otherwise never be
-    // re-examined and its content would stay searchable.
+    // Indexed sessions whose directory now matches an excluded_paths rule,
+    // grouped by source. We purge these per-source INSIDE the loop below,
+    // after the scope filters, so a scoped/usage-only sync only mutates the
+    // sources it actually processes. This must happen regardless of the
+    // incremental scan (which skips unchanged files) — otherwise a session
+    // indexed before the rule was added would stay searchable.
+    let mut excluded_by_source: std::collections::HashMap<String, Vec<String>> = Default::default();
     if let Some(matcher) = &path_excluder {
         for (source, source_id, directory) in store.all_session_paths()? {
-            // Honour the same source scope as the sync loop below: a
-            // `--source` filter or a disabled source must not have its rows
-            // mutated by a scoped/partial sync.
-            if let Some(sources) = &options.sources
-                && !sources.iter().any(|id| id == &source)
-            {
-                continue;
-            }
-            if !config.is_source_enabled(&source) {
-                continue;
-            }
             if directory.as_deref().is_some_and(|d| matcher.is_match(d)) {
-                store.delete_session_data(&source, &source_id)?;
-                excluded_out += 1;
+                excluded_by_source.entry(source).or_default().push(source_id);
             }
         }
     }
@@ -442,6 +432,17 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
                 println!("Skipping {label} (filtered)");
             }
             continue;
+        }
+
+        // Purge already-indexed rows for this in-scope source whose cwd now
+        // matches an excluded_paths rule (handles sessions the incremental
+        // scan would otherwise skip). Runs only for sources this sync
+        // actually processes — past all the scope filters above.
+        if let Some(ids) = excluded_by_source.get(source_id) {
+            for sid in ids {
+                store.delete_session_data(source_id, sid)?;
+                excluded_out += 1;
+            }
         }
 
         if options.verbose {
