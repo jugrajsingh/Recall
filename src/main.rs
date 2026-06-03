@@ -400,6 +400,17 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
     // re-examined and its content would stay searchable.
     if let Some(matcher) = &path_excluder {
         for (source, source_id, directory) in store.all_session_paths()? {
+            // Honour the same source scope as the sync loop below: a
+            // `--source` filter or a disabled source must not have its rows
+            // mutated by a scoped/partial sync.
+            if let Some(sources) = &options.sources
+                && !sources.iter().any(|id| id == &source)
+            {
+                continue;
+            }
+            if !config.is_source_enabled(&source) {
+                continue;
+            }
             if directory.as_deref().is_some_and(|d| matcher.is_match(d)) {
                 store.delete_session_data(&source, &source_id)?;
                 excluded_out += 1;
