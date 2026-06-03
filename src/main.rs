@@ -393,6 +393,20 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
     let mut filtered_out = 0u32;
     let mut excluded_out = 0u32;
 
+    // Pre-sync purge: drop any already-indexed session whose directory now
+    // matches an excluded_paths rule. This must run BEFORE the per-adapter
+    // scan because incremental sync skips unchanged sessions entirely — so
+    // a session indexed before the rule was added would otherwise never be
+    // re-examined and its content would stay searchable.
+    if let Some(matcher) = &path_excluder {
+        for (source, source_id, directory) in store.all_session_paths()? {
+            if directory.as_deref().is_some_and(|d| matcher.is_match(d)) {
+                store.delete_session_data(&source, &source_id)?;
+                excluded_out += 1;
+            }
+        }
+    }
+
     for adapter in &all {
         let source_id = adapter.id();
         let label = adapter.label();
@@ -481,19 +495,20 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
             // identified only by file path) can't be matched here; once a
             // `source_file_path` field lands on RawSession, extend this
             // arm to also test against it.
+            // Decline to index a session whose cwd matches a rule. Existing
+            // indexed rows are already purged by the pre-sync pass above;
+            // this guards sessions appearing in this scan (new or changed).
             if let Some(matcher) = &path_excluder
                 && let Some(dir) = raw.directory.as_deref()
                 && matcher.is_match(dir)
             {
-                // If the user added a rule after this session was already
-                // indexed, purge the stale rows so excluded content stops
-                // being searchable — otherwise it lingers until a full reset.
                 if existing_meta.remove(&raw.source_id).is_some() {
                     store.delete_session_data(source_id, &raw.source_id)?;
                     existing_usage_meta.remove(&raw.source_id);
                     existing_event_meta.remove(&raw.source_id);
+                } else {
+                    excluded_out += 1;
                 }
-                excluded_out += 1;
                 continue;
             }
 
