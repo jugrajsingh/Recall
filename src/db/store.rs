@@ -812,6 +812,22 @@ impl Store {
         Ok(SemanticProgress { current_session_title, ..progress })
     }
 
+    /// Every indexed session as `(source, source_id, directory)`. Lets the
+    /// pre-sync prune pass evaluate exclusion rules against rows already in
+    /// the DB — even ones the incremental scan would skip because their
+    /// file is unchanged.
+    pub fn all_session_paths(&self) -> Result<Vec<(String, String, Option<String>)>> {
+        let mut stmt = self.conn.prepare("SELECT source, source_id, directory FROM sessions")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn delete_session_data(&self, source: &str, source_id: &str) -> Result<()> {
         let session_ids: Vec<String> = {
             let mut stmt = self
@@ -1342,4 +1358,48 @@ fn apply_scope_filters(
 
 fn directory_child_pattern(dir: &str) -> String {
     if dir.ends_with('/') { format!("{dir}%") } else { format!("{dir}/%") }
+}
+
+#[cfg(test)]
+mod exclusion_tests {
+    use super::*;
+    use crate::types::Session;
+
+    fn sess(id: &str, dir: &str) -> Session {
+        Session {
+            id: id.to_string(),
+            source: "claude-code".to_string(),
+            source_id: format!("src-{id}"),
+            title: "t".to_string(),
+            directory: Some(dir.to_string()),
+            started_at: 0,
+            updated_at: Some(1),
+            message_count: 0,
+            entrypoint: None,
+        }
+    }
+
+    /// all_session_paths must surface every indexed row's directory so the
+    /// pre-sync exclusion pass can purge matches that incremental sync would
+    /// otherwise skip. Regression for the codex P1: excluded content stayed
+    /// searchable for unchanged sessions.
+    #[test]
+    fn all_session_paths_round_trips_then_delete_clears() {
+        crate::db::schema::register_sqlite_vec();
+        let store = Store::open_in_memory().unwrap();
+        store.insert_session(&sess("a", "/home/u/proj")).unwrap();
+        store.insert_session(&sess("b", "/home/u/.claude-mem/observer-sessions/x")).unwrap();
+
+        let paths = store.all_session_paths().unwrap();
+        assert_eq!(paths.len(), 2);
+        let observer =
+            paths.iter().find(|(_, sid, _)| sid == "src-b").expect("observer session present");
+        assert_eq!(observer.2.as_deref(), Some("/home/u/.claude-mem/observer-sessions/x"));
+
+        // Simulate the pre-sync purge of the excluded row.
+        store.delete_session_data("claude-code", "src-b").unwrap();
+        let after = store.all_session_paths().unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].1, "src-a");
+    }
 }

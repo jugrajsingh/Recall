@@ -381,6 +381,9 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
     let mut config = AppConfig::load_or_default();
     config.normalize_sources(&labels);
     let since_ts = if options.usage_only { None } else { config.sync_window.to_since_cutoff() };
+    // Single matcher across all adapters. None when no rules configured —
+    // costs nothing at the loop check site.
+    let path_excluder = config.build_path_excluder()?;
 
     let mut new_sessions = 0u32;
     let mut updated_sessions = 0u32;
@@ -388,6 +391,25 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
     let mut total_messages = 0u32;
     let mut skipped = 0u32;
     let mut filtered_out = 0u32;
+    let mut excluded_out = 0u32;
+
+    // Indexed sessions whose directory now matches an excluded_paths rule,
+    // grouped by source. We purge these per-source INSIDE the loop below,
+    // after the scope filters, so a scoped/usage-only sync only mutates the
+    // sources it actually processes. This must happen regardless of the
+    // incremental scan (which skips unchanged files) — otherwise a session
+    // indexed before the rule was added would stay searchable.
+    let mut excluded_by_source: std::collections::HashMap<
+        String,
+        std::collections::HashSet<String>,
+    > = Default::default();
+    if let Some(matcher) = &path_excluder {
+        for (source, source_id, directory) in store.all_session_paths()? {
+            if directory.as_deref().is_some_and(|d| matcher.is_match(d)) {
+                excluded_by_source.entry(source).or_default().insert(source_id);
+            }
+        }
+    }
 
     for adapter in &all {
         let source_id = adapter.id();
@@ -413,6 +435,17 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
                 println!("Skipping {label} (filtered)");
             }
             continue;
+        }
+
+        // Purge already-indexed rows for this in-scope source whose cwd now
+        // matches an excluded_paths rule (handles sessions the incremental
+        // scan would otherwise skip). Runs only for sources this sync
+        // actually processes — past all the scope filters above.
+        if let Some(ids) = excluded_by_source.get(source_id) {
+            for sid in ids {
+                store.delete_session_data(source_id, sid)?;
+                excluded_out += 1;
+            }
         }
 
         if options.verbose {
@@ -470,6 +503,29 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
                     filtered_out += 1;
                     continue;
                 }
+            }
+
+            // Drop sessions whose cwd matches any excluded_paths glob.
+            // Sessions with no `directory` (e.g. observer-style sessions
+            // identified only by file path) can't be matched here; once a
+            // `source_file_path` field lands on RawSession, extend this arm too.
+            // Indexed rows are purged in the pre-sync pass above; this arm
+            // catches new/changed sessions from the current scan (e.g. --force).
+            if let Some(matcher) = &path_excluder
+                && let Some(dir) = raw.directory.as_deref()
+                && matcher.is_match(dir)
+            {
+                if existing_meta.remove(&raw.source_id).is_some() {
+                    store.delete_session_data(source_id, &raw.source_id)?;
+                    existing_usage_meta.remove(&raw.source_id);
+                    existing_event_meta.remove(&raw.source_id);
+                } else if !excluded_by_source
+                    .get(source_id)
+                    .is_some_and(|ids| ids.contains(&raw.source_id))
+                {
+                    excluded_out += 1;
+                }
+                continue;
             }
 
             let raw_source_id = raw.source_id.clone();
@@ -644,6 +700,9 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
         }
         if filtered_out > 0 {
             print!(", {filtered_out} outside configured time scope");
+        }
+        if excluded_out > 0 {
+            print!(", {excluded_out} excluded by excluded_paths");
         }
         println!();
         println!(
