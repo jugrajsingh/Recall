@@ -399,11 +399,14 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
     // sources it actually processes. This must happen regardless of the
     // incremental scan (which skips unchanged files) — otherwise a session
     // indexed before the rule was added would stay searchable.
-    let mut excluded_by_source: std::collections::HashMap<String, Vec<String>> = Default::default();
+    let mut excluded_by_source: std::collections::HashMap<
+        String,
+        std::collections::HashSet<String>,
+    > = Default::default();
     if let Some(matcher) = &path_excluder {
         for (source, source_id, directory) in store.all_session_paths()? {
             if directory.as_deref().is_some_and(|d| matcher.is_match(d)) {
-                excluded_by_source.entry(source).or_default().push(source_id);
+                excluded_by_source.entry(source).or_default().insert(source_id);
             }
         }
     }
@@ -505,11 +508,9 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
             // Drop sessions whose cwd matches any excluded_paths glob.
             // Sessions with no `directory` (e.g. observer-style sessions
             // identified only by file path) can't be matched here; once a
-            // `source_file_path` field lands on RawSession, extend this
-            // arm to also test against it.
-            // Decline to index a session whose cwd matches a rule. Existing
-            // indexed rows are already purged by the pre-sync pass above;
-            // this guards sessions appearing in this scan (new or changed).
+            // `source_file_path` field lands on RawSession, extend this arm too.
+            // Indexed rows are purged in the pre-sync pass above; this arm
+            // catches new/changed sessions from the current scan (e.g. --force).
             if let Some(matcher) = &path_excluder
                 && let Some(dir) = raw.directory.as_deref()
                 && matcher.is_match(dir)
@@ -518,7 +519,10 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
                     store.delete_session_data(source_id, &raw.source_id)?;
                     existing_usage_meta.remove(&raw.source_id);
                     existing_event_meta.remove(&raw.source_id);
-                } else {
+                } else if !excluded_by_source
+                    .get(source_id)
+                    .is_some_and(|ids| ids.contains(&raw.source_id))
+                {
                     excluded_out += 1;
                 }
                 continue;
