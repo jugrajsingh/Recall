@@ -25,6 +25,9 @@ fn make_session(id: &str, source: &str, source_id: &str, title: &str) -> Session
         updated_at: None,
         message_count: 1,
         entrypoint: None,
+        custom_title: None,
+        summary: None,
+        duration_minutes: None,
     }
 }
 
@@ -563,6 +566,9 @@ fn sync_skips_unchanged_session() {
         updated_at: Some(2000),
         message_count: 2,
         entrypoint: None,
+        custom_title: None,
+        summary: None,
+        duration_minutes: None,
     };
     store.insert_session(&session).unwrap();
 
@@ -583,6 +589,9 @@ fn sync_detects_new_messages() {
         updated_at: Some(2000),
         message_count: 2,
         entrypoint: None,
+        custom_title: None,
+        summary: None,
+        duration_minutes: None,
     };
     store.insert_session(&session).unwrap();
     store.insert_messages(&[make_message("s1", Role::User, "hello", 0)]).unwrap();
@@ -615,6 +624,9 @@ fn sync_detects_updated_timestamp() {
         updated_at: Some(2000),
         message_count: 3,
         entrypoint: None,
+        custom_title: None,
+        summary: None,
+        duration_minutes: None,
     };
     store.insert_session(&session).unwrap();
 

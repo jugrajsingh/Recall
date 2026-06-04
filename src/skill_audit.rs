@@ -493,6 +493,9 @@ mod tests {
             updated_at: Some(now),
             message_count: 0,
             entrypoint: None,
+            custom_title: None,
+            summary: None,
+            duration_minutes: None,
         };
         let event = RawSessionEvent {
             event_seq: 0,
@@ -542,6 +545,9 @@ mod tests {
             updated_at: Some(now),
             message_count: 0,
             entrypoint: None,
+            custom_title: None,
+            summary: None,
+            duration_minutes: None,
         };
         let event = RawSessionEvent {
             event_seq: 0,

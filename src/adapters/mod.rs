@@ -50,6 +50,19 @@ pub struct RawSession {
     pub usage_parser_version: Option<u32>,
     pub events: Vec<RawSessionEvent>,
     pub event_parser_version: Option<u32>,
+    /// Absolute path of the on-disk source file for this session, when
+    /// known. Used by path-exclusion to match sessions that have no `cwd`
+    /// (e.g. observer / claude-mem sessions). Display layer ignores this.
+    pub source_file_path: Option<String>,
+    /// Source-provided title override. For Claude Code this is the
+    /// `type=custom-title` event written by `/rename`. Wins over any
+    /// derived label when present.
+    pub custom_title: Option<String>,
+    /// Source-provided auto-summary. For Claude Code this is the
+    /// `type=summary` event. First non-empty value wins.
+    pub summary: Option<String>,
+    /// First->last message timestamp span in minutes, when computable.
+    pub duration_minutes: Option<u32>,
 }
 
 impl RawSession {
@@ -72,6 +85,10 @@ impl RawSession {
             usage_parser_version: None,
             events: Vec::new(),
             event_parser_version: None,
+            source_file_path: None,
+            custom_title: None,
+            summary: None,
+            duration_minutes: None,
         }
     }
 

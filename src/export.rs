@@ -38,6 +38,9 @@ struct ExportSession {
     updated_at: Option<i64>,
     message_count: u32,
     entrypoint: Option<String>,
+    custom_title: Option<String>,
+    summary: Option<String>,
+    duration_minutes: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -118,6 +121,9 @@ impl From<Session> for ExportSession {
             updated_at: session.updated_at,
             message_count: session.message_count,
             entrypoint: session.entrypoint,
+            custom_title: session.custom_title,
+            summary: session.summary,
+            duration_minutes: session.duration_minutes,
         }
     }
 }

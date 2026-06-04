@@ -453,6 +453,10 @@ fn parse_codex_session_with_options(
         usage_parser_version: Some(USAGE_PARSER_VERSION),
         events,
         event_parser_version: include_events.then_some(EVENT_PARSER_VERSION),
+        source_file_path: None,
+        custom_title: None,
+        summary: None,
+        duration_minutes: None,
     }))
 }
 
@@ -1365,6 +1369,9 @@ mod tests {
             updated_at: Some(updated_at),
             message_count,
             entrypoint: None,
+            custom_title: None,
+            summary: None,
+            duration_minutes: None,
         }
     }
 

@@ -276,6 +276,10 @@ fn parse_pi_session_file(
         usage_parser_version: Some(USAGE_PARSER_VERSION),
         events: Vec::new(),
         event_parser_version: None,
+        source_file_path: None,
+        custom_title: None,
+        summary: None,
+        duration_minutes: None,
     }))
 }
 
@@ -681,6 +685,9 @@ mod tests {
             updated_at: Some(updated_at),
             message_count,
             entrypoint: None,
+            custom_title: None,
+            summary: None,
+            duration_minutes: None,
         }
     }
 

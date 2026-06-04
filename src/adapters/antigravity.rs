@@ -313,6 +313,9 @@ mod tests {
             updated_at: Some(updated_at),
             message_count,
             entrypoint: None,
+            custom_title: None,
+            summary: None,
+            duration_minutes: None,
         }
     }
 

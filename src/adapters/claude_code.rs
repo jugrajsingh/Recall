@@ -17,8 +17,17 @@ use crate::types::{RawSessionEvent, RawUsageEvent, Role, TokenSource};
 
 pub struct ClaudeCodeAdapter;
 
-const USAGE_PARSER_VERSION: u32 = 4;
-const EVENT_PARSER_VERSION: u32 = 1;
+// Bumped 4 → 5: usage is now extracted from machinery (isSidechain /
+// isCompactSummary / isMeta) assistant turns too. Bumping invalidates the
+// stored usage_session_state so already-synced sessions are reparsed on the
+// next sync — without it, file_scan pre-skips unchanged files and the newly
+// captured sidechain tokens (and, via the metadata-stale path, the migrated
+// custom_title/summary/duration columns) would never be backfilled.
+const USAGE_PARSER_VERSION: u32 = 5;
+// Bumped 1 → 2: machinery turns (isSidechain / isCompactSummary / isMeta)
+// no longer emit session_events. Bumping invalidates event_session_state so
+// existing sessions re-backfill events and stale machinery rows are dropped.
+const EVENT_PARSER_VERSION: u32 = 2;
 
 impl SourceAdapter for ClaudeCodeAdapter {
     fn id(&self) -> &str {
@@ -266,8 +275,22 @@ fn parse_claude_session_file(
         .or_else(|| parsed.messages.first().and_then(|m| m.timestamp))
         .or_else(|| parsed.usage_events.first().map(|event| event.timestamp))
         .unwrap_or(0);
-    let directory = meta.and_then(|m| m.cwd.clone()).or(entry.directory);
+    // Priority: live session-index JSON (most authoritative when present)
+    // -> per-line `cwd` in the JSONL itself (durable; Claude Code >=2.x)
+    // -> entry.directory (decoded from the path-encoded dir name).
+    // Without the JSONL fallback, historical sessions (whose session-index
+    // entry is gone because the PID exited) show '(no cwd)' or fall through
+    // to a possibly-lossy directory-name decode.
+    let directory =
+        meta.and_then(|m| m.cwd.clone()).or_else(|| parsed.cwd.clone()).or(entry.directory);
     let entrypoint = meta.and_then(|m| m.entrypoint.clone());
+    let source_file_path = entry.stat_target.to_str().map(|s| s.to_string());
+    // A single timestamped message has first_ts == last_ts → a real
+    // 0-minute span, so use >= (not >) to record it rather than None.
+    let duration_minutes = match (parsed.first_ts, parsed.last_ts) {
+        (Some(first), Some(last)) if last >= first => Some(((last - first) / 60_000) as u32),
+        _ => None,
+    };
     Ok(Some(RawSession {
         source_id: entry.session_id,
         directory,
@@ -279,6 +302,10 @@ fn parse_claude_session_file(
         usage_parser_version: Some(USAGE_PARSER_VERSION),
         events: parsed.events,
         event_parser_version: include_events.then_some(EVENT_PARSER_VERSION),
+        source_file_path,
+        custom_title: parsed.custom_title,
+        summary: parsed.summary,
+        duration_minutes,
     }))
 }
 
@@ -286,6 +313,18 @@ struct ParsedConversation {
     messages: Vec<RawMessage>,
     usage_events: Vec<RawUsageEvent>,
     events: Vec<RawSessionEvent>,
+    /// First non-empty `cwd` seen on any JSONL line. Claude Code ≥2.x
+    /// writes `cwd` per-message; provides a durable directory source
+    /// independent of the live `~/.claude/sessions/<pid>.json` index.
+    cwd: Option<String>,
+    /// Claude `/rename` value from `type=custom-title` JSONL events.
+    custom_title: Option<String>,
+    /// Claude auto-generated session summary from `type=summary` events.
+    summary: Option<String>,
+    /// Earliest message timestamp seen (ms epoch).
+    first_ts: Option<i64>,
+    /// Latest message timestamp seen (ms epoch).
+    last_ts: Option<i64>,
 }
 
 fn parse_conversation_jsonl(
@@ -299,6 +338,11 @@ fn parse_conversation_jsonl(
     let mut usage_events: Vec<RawUsageEvent> = Vec::new();
     let mut events = Vec::new();
     let mut usage_index: HashMap<String, usize> = HashMap::new();
+    let mut cwd: Option<String> = None;
+    let mut custom_title: Option<String> = None;
+    let mut summary: Option<String> = None;
+    let mut first_ts: Option<i64> = None;
+    let mut last_ts: Option<i64> = None;
     let source_path = path.to_string_lossy().to_string();
 
     for (line_index, line) in reader.lines().enumerate() {
@@ -312,11 +356,59 @@ fn parse_conversation_jsonl(
             Err(_) => continue,
         };
 
+        // Capture the first non-empty cwd from any line, before the type
+        // filter. Claude Code ≥2.x writes cwd on user/assistant lines, but
+        // checking unconditionally is cheap and future-proof.
+        if cwd.is_none()
+            && let Some(c) = v.get("cwd").and_then(|s| s.as_str())
+            && !c.is_empty()
+        {
+            cwd = Some(c.to_string());
+        }
+
         let msg_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        // Claude `/rename` writes a `custom-title` (and sibling `agent-name`)
+        // event. Most recent non-empty value wins.
+        if msg_type == "custom-title"
+            && let Some(title) = v.get("customTitle").and_then(|t| t.as_str())
+        {
+            // Latest NON-empty wins; a trailing blank event must not clear a
+            // previously captured rename.
+            let trimmed = title.trim();
+            if !trimmed.is_empty() {
+                custom_title = Some(trimmed.to_string());
+            }
+            continue;
+        }
+        // Claude's auto-summary event. First non-empty value wins; later
+        // regenerations are rarely better.
+        if msg_type == "summary"
+            && summary.is_none()
+            && let Some(s) = v.get("summary").and_then(|t| t.as_str())
+        {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                summary = Some(trimmed.to_string());
+            }
+            continue;
+        }
+
         match msg_type {
             "user" | "assistant" => {}
             _ => continue,
         }
+
+        // Machinery lines that Claude itself doesn't surface in the resumed
+        // conversation: compact summary blocks, sub-agent / tool plumbing,
+        // and `/compact` / `/clear` meta markers. JSONL-flag based, not
+        // substring based — more reliable across CLI versions. We hide these
+        // from the searchable conversation but STILL extract their usage
+        // (sub-agent transcripts carry real billed tokens — dropping them
+        // would understate usage reports).
+        let is_machinery = v.get("isCompactSummary").and_then(|b| b.as_bool()).unwrap_or(false)
+            || v.get("isSidechain").and_then(|b| b.as_bool()).unwrap_or(false)
+            || v.get("isMeta").and_then(|b| b.as_bool()).unwrap_or(false);
 
         let role = if msg_type == "user" { Role::User } else { Role::Assistant };
 
@@ -332,18 +424,12 @@ fn parse_conversation_jsonl(
             .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
             .map(|dt| dt.timestamp_millis());
 
-        let message_seq = if !text.is_empty() { Some(messages.len() as u32) } else { None };
-        if include_events {
-            collect_claude_content_events(
-                message.get("content"),
-                role.clone(),
-                timestamp,
-                &source_path,
-                line_index,
-                message_seq,
-                &mut events,
-            );
-        }
+        // A machinery turn is not stored as a message, so it has no message
+        // sequence to correlate against — its usage event links to None.
+        let message_seq =
+            if !is_machinery && !text.is_empty() { Some(messages.len() as u32) } else { None };
+
+        // Usage extraction runs for every assistant turn, machinery or not.
         if role == Role::Assistant
             && let Some(event) = extract_claude_usage_event(
                 &v,
@@ -362,12 +448,48 @@ fn parse_conversation_jsonl(
             }
         }
 
+        // Everything below is conversation surface (duration span, content
+        // events, stored message text) — skip it for machinery turns.
+        if is_machinery {
+            continue;
+        }
+
+        if let Some(ts) = timestamp {
+            if first_ts.is_none_or(|f| ts < f) {
+                first_ts = Some(ts);
+            }
+            if last_ts.is_none_or(|l| ts > l) {
+                last_ts = Some(ts);
+            }
+        }
+
+        if include_events {
+            collect_claude_content_events(
+                message.get("content"),
+                role.clone(),
+                timestamp,
+                &source_path,
+                line_index,
+                message_seq,
+                &mut events,
+            );
+        }
+
         if !text.is_empty() {
             messages.push(RawMessage { role, content: text, timestamp });
         }
     }
 
-    Ok(ParsedConversation { messages, usage_events, events })
+    Ok(ParsedConversation {
+        messages,
+        usage_events,
+        events,
+        cwd,
+        custom_title,
+        summary,
+        first_ts,
+        last_ts,
+    })
 }
 
 fn collect_claude_content_events(
@@ -709,6 +831,9 @@ mod tests {
             updated_at: Some(updated_at),
             message_count,
             entrypoint: None,
+            custom_title: None,
+            summary: None,
+            duration_minutes: None,
         }
     }
 
@@ -926,5 +1051,42 @@ mod tests {
             project_key_to_path("-Users-x-git-samzong-Recall"),
             "/Users/x/git/samzong/Recall"
         );
+    }
+
+    #[test]
+    fn machinery_turn_keeps_usage_but_drops_message() {
+        // A sub-agent (isSidechain) assistant turn carries real billed
+        // tokens. It must NOT appear as a conversation message, but its
+        // usage event must still be captured (regression for the early
+        // machinery `continue` that dropped usage).
+        let dir = std::env::temp_dir().join(format!("recall-mach-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("sess.jsonl");
+        let mut f = fs::File::create(&path).unwrap();
+        // Normal user turn (visible) + a sidechain assistant turn with usage.
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":"hi"}},"timestamp":"2026-05-20T10:00:00Z"}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant","isSidechain":true,"message":{{"role":"assistant","content":"sub-agent work","usage":{{"input_tokens":100,"output_tokens":50}},"model":"claude-x"}},"timestamp":"2026-05-20T10:00:01Z"}}"#
+        )
+        .unwrap();
+
+        let parsed = parse_conversation_jsonl(&path, 0, true).unwrap();
+
+        // The sidechain turn contributes no visible message …
+        assert!(
+            parsed.messages.iter().all(|m| m.content != "sub-agent work"),
+            "machinery turn must not be a stored message"
+        );
+        // … but its usage event is retained.
+        assert!(
+            !parsed.usage_events.is_empty(),
+            "usage event from the machinery turn must be preserved"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

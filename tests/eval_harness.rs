@@ -20,6 +20,9 @@ fn session(id: &str, source: &str, source_id: &str, title: &str) -> Session {
         updated_at: None,
         message_count: 1,
         entrypoint: None,
+        custom_title: None,
+        summary: None,
+        duration_minutes: None,
     }
 }
 

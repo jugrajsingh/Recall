@@ -136,10 +136,40 @@ impl Store {
         rows.collect::<Result<HashMap<_, _>, _>>().map_err(Into::into)
     }
 
+    /// Update only the metadata columns on an existing session row, keyed
+    /// by (source, source_id). Used to backfill custom_title/summary/
+    /// duration_minutes when a session is reparsed but its conversation
+    /// content is unchanged (the BackfillOnly path), so migrated rows get
+    /// populated without rebuilding messages/FTS. Also refreshes the
+    /// displayed title from custom_title when present. Returns true if a
+    /// row was updated.
+    pub fn update_session_metadata(
+        &self,
+        source: &str,
+        source_id: &str,
+        custom_title: Option<&str>,
+        summary: Option<&str>,
+        duration_minutes: Option<u32>,
+    ) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE sessions
+                SET custom_title = ?3,
+                    summary = ?4,
+                    duration_minutes = ?5,
+                    title = CASE
+                        WHEN ?3 IS NOT NULL AND ?3 != '' THEN ?3
+                        ELSE title
+                    END
+              WHERE source = ?1 AND source_id = ?2",
+            rusqlite::params![source, source_id, custom_title, summary, duration_minutes],
+        )?;
+        Ok(n > 0)
+    }
+
     pub fn insert_session(&self, session: &Session) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO sessions (id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT OR REPLACE INTO sessions (id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint, custom_title, summary, duration_minutes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             rusqlite::params![
                 session.id,
                 session.source,
@@ -150,6 +180,9 @@ impl Store {
                 session.updated_at,
                 session.message_count,
                 session.entrypoint,
+                session.custom_title,
+                session.summary,
+                session.duration_minutes,
             ],
         )?;
         Ok(())
@@ -209,8 +242,8 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         {
             tx.execute(
-                "INSERT OR REPLACE INTO sessions (id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT OR REPLACE INTO sessions (id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint, custom_title, summary, duration_minutes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 rusqlite::params![
                     session.id,
                     session.source,
@@ -221,6 +254,9 @@ impl Store {
                     session.updated_at,
                     session.message_count,
                     session.entrypoint,
+                    session.custom_title,
+                    session.summary,
+                    session.duration_minutes,
                 ],
             )?;
 
@@ -981,7 +1017,7 @@ impl Store {
         let placeholders =
             std::iter::repeat_n("?", session_ids.len()).collect::<Vec<_>>().join(", ");
         let sql = format!(
-            "SELECT id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint
+            "SELECT id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint, custom_title, summary, duration_minutes
              FROM sessions
              WHERE id IN ({placeholders})
              ORDER BY started_at DESC"
@@ -1000,6 +1036,9 @@ impl Store {
                 updated_at: row.get(6)?,
                 message_count: row.get(7)?,
                 entrypoint: row.get(8)?,
+                custom_title: row.get(9).ok().flatten(),
+                summary: row.get(10).ok().flatten(),
+                duration_minutes: row.get::<_, Option<i64>>(11).ok().flatten().map(|v| v as u32),
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -1155,7 +1194,7 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<Session>> {
         let mut sql = String::from(
-            "SELECT id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint
+            "SELECT id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint, custom_title, summary, duration_minutes
              FROM sessions s
              WHERE 1=1",
         );
@@ -1178,6 +1217,9 @@ impl Store {
                 updated_at: row.get(6)?,
                 message_count: row.get(7)?,
                 entrypoint: row.get(8)?,
+                custom_title: row.get(9).ok().flatten(),
+                summary: row.get(10).ok().flatten(),
+                duration_minutes: row.get::<_, Option<i64>>(11).ok().flatten().map(|v| v as u32),
             })
         })?;
         let mut sessions = Vec::new();
@@ -1195,7 +1237,7 @@ impl Store {
         limit: Option<usize>,
     ) -> Result<Vec<Session>> {
         let mut sql = String::from(
-            "SELECT id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint
+            "SELECT id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint, custom_title, summary, duration_minutes
              FROM sessions s
              WHERE 1=1",
         );
@@ -1221,6 +1263,9 @@ impl Store {
                 updated_at: row.get(6)?,
                 message_count: row.get(7)?,
                 entrypoint: row.get(8)?,
+                custom_title: row.get(9).ok().flatten(),
+                summary: row.get(10).ok().flatten(),
+                duration_minutes: row.get::<_, Option<i64>>(11).ok().flatten().map(|v| v as u32),
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -1376,6 +1421,9 @@ mod exclusion_tests {
             updated_at: Some(1),
             message_count: 0,
             entrypoint: None,
+            custom_title: None,
+            summary: None,
+            duration_minutes: None,
         }
     }
 

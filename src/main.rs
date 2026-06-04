@@ -602,6 +602,23 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
                                 );
                                 reprocessed = true;
                             }
+                            // Backfill the metadata columns on the existing
+                            // row (cheap targeted UPDATE — no message/FTS
+                            // rebuild). Covers migrated rows that parse anew
+                            // via the parser-version bump but whose content
+                            // is unchanged, so they don't keep NULL metadata.
+                            if raw.custom_title.is_some()
+                                || raw.summary.is_some()
+                                || raw.duration_minutes.is_some()
+                            {
+                                store.update_session_metadata(
+                                    source_id,
+                                    &raw_source_id,
+                                    raw.custom_title.as_deref(),
+                                    raw.summary.as_deref(),
+                                    raw.duration_minutes,
+                                )?;
+                            }
                             if reprocessed {
                                 reprocessed_sessions += 1;
                             }
@@ -623,7 +640,12 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
             }
 
             let session_uuid = uuid::Uuid::new_v4().to_string();
-            let title = generate_title(&raw.messages);
+            // custom_title overrides derived title when present.
+            let title = raw
+                .custom_title
+                .clone()
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| generate_title(&raw.messages));
 
             let session = Session {
                 id: session_uuid.clone(),
@@ -635,6 +657,9 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
                 updated_at: raw.updated_at,
                 message_count: msg_count,
                 entrypoint: raw.entrypoint,
+                custom_title: raw.custom_title,
+                summary: raw.summary,
+                duration_minutes: raw.duration_minutes,
             };
 
             let messages: Vec<Message> = raw

@@ -177,7 +177,7 @@ impl<'a> SearchEngine<'a> {
 
         let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
-            "SELECT id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint
+            "SELECT id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint, custom_title, summary, duration_minutes
              FROM sessions WHERE id IN ({})",
             placeholders.join(", ")
         );
@@ -197,6 +197,9 @@ impl<'a> SearchEngine<'a> {
                 updated_at: row.get(6)?,
                 message_count: row.get(7)?,
                 entrypoint: row.get(8)?,
+                custom_title: row.get(9).ok().flatten(),
+                summary: row.get(10).ok().flatten(),
+                duration_minutes: row.get::<_, Option<i64>>(11).ok().flatten().map(|v| v as u32),
             })
         })?;
 
