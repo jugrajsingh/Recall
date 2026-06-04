@@ -17,16 +17,7 @@ use crate::types::{RawSessionEvent, RawUsageEvent, Role, TokenSource};
 
 pub struct ClaudeCodeAdapter;
 
-// Bumped 4 → 5: usage is now extracted from machinery (isSidechain /
-// isCompactSummary / isMeta) assistant turns too. Bumping invalidates the
-// stored usage_session_state so already-synced sessions are reparsed on the
-// next sync — without it, file_scan pre-skips unchanged files and the newly
-// captured sidechain tokens (and, via the metadata-stale path, the migrated
-// custom_title/summary/duration columns) would never be backfilled.
 const USAGE_PARSER_VERSION: u32 = 5;
-// Bumped 1 → 2: machinery turns (isSidechain / isCompactSummary / isMeta)
-// no longer emit session_events. Bumping invalidates event_session_state so
-// existing sessions re-backfill events and stale machinery rows are dropped.
 const EVENT_PARSER_VERSION: u32 = 2;
 
 impl SourceAdapter for ClaudeCodeAdapter {
@@ -52,17 +43,17 @@ impl SourceAdapter for ClaudeCodeAdapter {
         let Some(claude_dir) = resolve_claude_dir()? else {
             return Ok(vec![]);
         };
-        let session_index = load_session_index(&claude_dir);
+        let mut indexes = load_session_indexes(&claude_dir);
 
         let mut sessions = Vec::new();
-        let mut entries = collect_project_entries(&claude_dir, &session_index);
+        let mut entries = collect_project_entries(&claude_dir, &mut indexes);
         entries.extend(collect_transcript_entries(&claude_dir));
 
         for entry in entries {
             let Some(mtime_ms) = file_scan::stat_mtime_ms(&entry.stat_target) else {
                 continue;
             };
-            if let Some(raw) = parse_claude_session_file(entry, mtime_ms, &session_index, true)? {
+            if let Some(raw) = parse_claude_session_file(entry, mtime_ms, &indexes, true)? {
                 sessions.push(raw);
             }
         }
@@ -86,8 +77,18 @@ impl SourceAdapter for ClaudeCodeAdapter {
 
 struct SessionMeta {
     cwd: Option<String>,
-    started_at: i64,
+    started_at: Option<i64>,
     entrypoint: Option<String>,
+}
+
+#[derive(Default)]
+struct SessionIndexes {
+    live: HashMap<String, SessionMeta>,
+    project_summaries: HashMap<String, String>,
+}
+
+fn load_session_indexes(claude_dir: &Path) -> SessionIndexes {
+    SessionIndexes { live: load_session_index(claude_dir), project_summaries: HashMap::new() }
 }
 
 fn resolve_claude_dir() -> anyhow::Result<Option<PathBuf>> {
@@ -106,8 +107,8 @@ fn scan_for_sync_impl(
     since_ts: Option<i64>,
     include_events: bool,
 ) -> anyhow::Result<SyncScanResult> {
-    let session_index = load_session_index(claude_dir);
-    let mut entries = collect_project_entries(claude_dir, &session_index);
+    let mut indexes = load_session_indexes(claude_dir);
+    let mut entries = collect_project_entries(claude_dir, &mut indexes);
     entries.extend(collect_transcript_entries(claude_dir));
 
     file_scan::run_file_scan_with_options(
@@ -119,9 +120,7 @@ fn scan_for_sync_impl(
             event_parser_version: include_events.then_some(EVENT_PARSER_VERSION),
         },
         entries,
-        |entry, mtime_ms| {
-            parse_claude_session_file(entry, mtime_ms, &session_index, include_events)
-        },
+        |entry, mtime_ms| parse_claude_session_file(entry, mtime_ms, &indexes, include_events),
     )
 }
 
@@ -156,7 +155,7 @@ fn load_session_index(claude_dir: &Path) -> HashMap<String, SessionMeta> {
         if let Some(session_id) = v.get("sessionId").and_then(|s| s.as_str()) {
             let meta = SessionMeta {
                 cwd: v.get("cwd").and_then(|s| s.as_str()).map(|s| s.to_string()),
-                started_at: v.get("startedAt").and_then(|s| s.as_i64()).unwrap_or(0),
+                started_at: v.get("startedAt").and_then(|s| s.as_i64()),
                 entrypoint: v.get("entrypoint").and_then(|s| s.as_str()).map(|s| s.to_string()),
             };
             index.insert(session_id.to_string(), meta);
@@ -165,10 +164,7 @@ fn load_session_index(claude_dir: &Path) -> HashMap<String, SessionMeta> {
     index
 }
 
-fn collect_project_entries(
-    claude_dir: &Path,
-    session_index: &HashMap<String, SessionMeta>,
-) -> Vec<FileScanEntry> {
+fn collect_project_entries(claude_dir: &Path, indexes: &mut SessionIndexes) -> Vec<FileScanEntry> {
     let projects_dir = claude_dir.join("projects");
     if !projects_dir.exists() {
         return vec![];
@@ -192,6 +188,7 @@ fn collect_project_entries(
 
         let dir_name = project_entry.file_name().to_string_lossy().to_string();
         let directory_hint = project_key_to_path(&dir_name);
+        merge_project_session_summaries(&project_path, &mut indexes.project_summaries);
 
         for file_entry in WalkDir::new(&project_path).into_iter().filter_map(|e| e.ok()) {
             let file_path = file_entry.path();
@@ -206,7 +203,7 @@ fn collect_project_entries(
                 _ => continue,
             };
 
-            let meta_cwd = session_index.get(&session_id).and_then(|m| m.cwd.clone());
+            let meta_cwd = indexes.live.get(&session_id).and_then(|m| m.cwd.clone());
             let directory = meta_cwd.or_else(|| Some(directory_hint.clone()));
 
             entries.push(FileScanEntry {
@@ -218,6 +215,41 @@ fn collect_project_entries(
     }
 
     entries
+}
+
+fn merge_project_session_summaries(
+    project_path: &Path,
+    project_summaries: &mut HashMap<String, String>,
+) {
+    let index_path = project_path.join("sessions-index.json");
+    let content = match fs::read_to_string(&index_path) {
+        Ok(content) => content,
+        Err(_) => return,
+    };
+    let v: Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(err) => {
+            debug!("failed to parse {}: {err}", index_path.display());
+            return;
+        }
+    };
+    let Some(entries) = v.get("entries").and_then(|entries| entries.as_array()) else {
+        return;
+    };
+    for entry in entries {
+        let Some(session_id) = entry.get("sessionId").and_then(|id| id.as_str()) else {
+            continue;
+        };
+        let Some(summary) = entry
+            .get("summary")
+            .and_then(|summary| summary.as_str())
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+        else {
+            continue;
+        };
+        project_summaries.insert(session_id.to_string(), summary.to_string());
+    }
 }
 
 fn collect_transcript_entries(claude_dir: &Path) -> Vec<FileScanEntry> {
@@ -254,7 +286,7 @@ fn collect_transcript_entries(claude_dir: &Path) -> Vec<FileScanEntry> {
 fn parse_claude_session_file(
     entry: FileScanEntry,
     mtime_ms: i64,
-    session_index: &HashMap<String, SessionMeta>,
+    indexes: &SessionIndexes,
     include_events: bool,
 ) -> anyhow::Result<Option<RawSession>> {
     let parsed = match parse_conversation_jsonl(&entry.stat_target, mtime_ms, include_events) {
@@ -269,28 +301,22 @@ fn parse_claude_session_file(
         return Ok(None);
     }
 
-    let meta = session_index.get(&entry.session_id);
+    let meta = indexes.live.get(&entry.session_id);
     let started_at = meta
-        .map(|m| m.started_at)
+        .and_then(|m| m.started_at)
         .or_else(|| parsed.messages.first().and_then(|m| m.timestamp))
         .or_else(|| parsed.usage_events.first().map(|event| event.timestamp))
         .unwrap_or(0);
-    // Priority: live session-index JSON (most authoritative when present)
-    // -> per-line `cwd` in the JSONL itself (durable; Claude Code >=2.x)
-    // -> entry.directory (decoded from the path-encoded dir name).
-    // Without the JSONL fallback, historical sessions (whose session-index
-    // entry is gone because the PID exited) show '(no cwd)' or fall through
-    // to a possibly-lossy directory-name decode.
     let directory =
         meta.and_then(|m| m.cwd.clone()).or_else(|| parsed.cwd.clone()).or(entry.directory);
     let entrypoint = meta.and_then(|m| m.entrypoint.clone());
     let source_file_path = entry.stat_target.to_str().map(|s| s.to_string());
-    // A single timestamped message has first_ts == last_ts → a real
-    // 0-minute span, so use >= (not >) to record it rather than None.
     let duration_minutes = match (parsed.first_ts, parsed.last_ts) {
         (Some(first), Some(last)) if last >= first => Some(((last - first) / 60_000) as u32),
         _ => None,
     };
+    let summary =
+        parsed.summary.or_else(|| indexes.project_summaries.get(&entry.session_id).cloned());
     Ok(Some(RawSession {
         source_id: entry.session_id,
         directory,
@@ -304,7 +330,7 @@ fn parse_claude_session_file(
         event_parser_version: include_events.then_some(EVENT_PARSER_VERSION),
         source_file_path,
         custom_title: parsed.custom_title,
-        summary: parsed.summary,
+        summary,
         duration_minutes,
     }))
 }
@@ -313,17 +339,10 @@ struct ParsedConversation {
     messages: Vec<RawMessage>,
     usage_events: Vec<RawUsageEvent>,
     events: Vec<RawSessionEvent>,
-    /// First non-empty `cwd` seen on any JSONL line. Claude Code ≥2.x
-    /// writes `cwd` per-message; provides a durable directory source
-    /// independent of the live `~/.claude/sessions/<pid>.json` index.
     cwd: Option<String>,
-    /// Claude `/rename` value from `type=custom-title` JSONL events.
     custom_title: Option<String>,
-    /// Claude auto-generated session summary from `type=summary` events.
     summary: Option<String>,
-    /// Earliest message timestamp seen (ms epoch).
     first_ts: Option<i64>,
-    /// Latest message timestamp seen (ms epoch).
     last_ts: Option<i64>,
 }
 
@@ -356,9 +375,6 @@ fn parse_conversation_jsonl(
             Err(_) => continue,
         };
 
-        // Capture the first non-empty cwd from any line, before the type
-        // filter. Claude Code ≥2.x writes cwd on user/assistant lines, but
-        // checking unconditionally is cheap and future-proof.
         if cwd.is_none()
             && let Some(c) = v.get("cwd").and_then(|s| s.as_str())
             && !c.is_empty()
@@ -368,21 +384,15 @@ fn parse_conversation_jsonl(
 
         let msg_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
-        // Claude `/rename` writes a `custom-title` (and sibling `agent-name`)
-        // event. Most recent non-empty value wins.
         if msg_type == "custom-title"
             && let Some(title) = v.get("customTitle").and_then(|t| t.as_str())
         {
-            // Latest NON-empty wins; a trailing blank event must not clear a
-            // previously captured rename.
             let trimmed = title.trim();
             if !trimmed.is_empty() {
                 custom_title = Some(trimmed.to_string());
             }
             continue;
         }
-        // Claude's auto-summary event. First non-empty value wins; later
-        // regenerations are rarely better.
         if msg_type == "summary"
             && summary.is_none()
             && let Some(s) = v.get("summary").and_then(|t| t.as_str())
@@ -399,13 +409,6 @@ fn parse_conversation_jsonl(
             _ => continue,
         }
 
-        // Machinery lines that Claude itself doesn't surface in the resumed
-        // conversation: compact summary blocks, sub-agent / tool plumbing,
-        // and `/compact` / `/clear` meta markers. JSONL-flag based, not
-        // substring based — more reliable across CLI versions. We hide these
-        // from the searchable conversation but STILL extract their usage
-        // (sub-agent transcripts carry real billed tokens — dropping them
-        // would understate usage reports).
         let is_machinery = v.get("isCompactSummary").and_then(|b| b.as_bool()).unwrap_or(false)
             || v.get("isSidechain").and_then(|b| b.as_bool()).unwrap_or(false)
             || v.get("isMeta").and_then(|b| b.as_bool()).unwrap_or(false);
@@ -424,12 +427,9 @@ fn parse_conversation_jsonl(
             .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
             .map(|dt| dt.timestamp_millis());
 
-        // A machinery turn is not stored as a message, so it has no message
-        // sequence to correlate against — its usage event links to None.
         let message_seq =
             if !is_machinery && !text.is_empty() { Some(messages.len() as u32) } else { None };
 
-        // Usage extraction runs for every assistant turn, machinery or not.
         if role == Role::Assistant
             && let Some(event) = extract_claude_usage_event(
                 &v,
@@ -448,8 +448,6 @@ fn parse_conversation_jsonl(
             }
         }
 
-        // Everything below is conversation surface (duration span, content
-        // events, stored message text) — skip it for machinery turns.
         if is_machinery {
             continue;
         }
@@ -734,7 +732,8 @@ mod tests {
             stat_target: path.clone(),
             directory: Some("/tmp/foo".to_string()),
         };
-        let raw = parse_claude_session_file(entry, mtime, &HashMap::new(), true).unwrap().unwrap();
+        let indexes = SessionIndexes::default();
+        let raw = parse_claude_session_file(entry, mtime, &indexes, true).unwrap().unwrap();
 
         assert_eq!(raw.events.len(), 2);
         assert_eq!(raw.events[0].kind, "file_read");
@@ -747,7 +746,7 @@ mod tests {
             stat_target: path,
             directory: Some("/tmp/foo".to_string()),
         };
-        let raw = parse_claude_session_file(entry, mtime, &HashMap::new(), false).unwrap().unwrap();
+        let raw = parse_claude_session_file(entry, mtime, &indexes, false).unwrap().unwrap();
 
         assert!(raw.events.is_empty());
         assert_eq!(raw.event_parser_version, None);
@@ -849,14 +848,153 @@ mod tests {
             stat_target: path.clone(),
             directory: Some("/tmp/foo".to_string()),
         };
-        let session_index = HashMap::new();
-        let raw = parse_claude_session_file(entry, mtime, &session_index, true).unwrap().unwrap();
+        let indexes = SessionIndexes::default();
+        let raw = parse_claude_session_file(entry, mtime, &indexes, true).unwrap().unwrap();
 
         assert_eq!(raw.source_id, "abc-123");
         assert_eq!(raw.updated_at, Some(mtime));
         assert_eq!(raw.directory.as_deref(), Some("/tmp/foo"));
         assert_eq!(raw.messages.len(), 1);
         assert_eq!(raw.messages[0].content, "hello");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_claude_session_file_uses_jsonl_cwd_between_session_index_and_entry_hint() {
+        let root = temp_claude_root("cwd");
+        let project = root.join("projects").join("-tmp-encoded");
+        fs::create_dir_all(&project).unwrap();
+        let path = project.join("cwd-session.jsonl");
+        let line = serde_json::json!({
+            "type": "user",
+            "cwd": "/tmp/from-jsonl",
+            "message": {"content": "hello"},
+            "timestamp": "2026-04-13T10:00:00Z"
+        });
+        let mut f = fs::File::create(&path).unwrap();
+        writeln!(f, "{line}").unwrap();
+        let mtime = file_scan::stat_mtime_ms(&path).unwrap();
+
+        let entry = FileScanEntry {
+            session_id: "cwd-session".to_string(),
+            stat_target: path.clone(),
+            directory: Some("/tmp/from-entry".to_string()),
+        };
+        let indexes = SessionIndexes::default();
+        let raw = parse_claude_session_file(entry, mtime, &indexes, true).unwrap().unwrap();
+        assert_eq!(raw.directory.as_deref(), Some("/tmp/from-jsonl"));
+        assert_eq!(raw.duration_minutes, Some(0));
+        assert_eq!(raw.source_file_path.as_deref(), path.to_str());
+
+        let entry = FileScanEntry {
+            session_id: "cwd-session".to_string(),
+            stat_target: path,
+            directory: Some("/tmp/from-entry".to_string()),
+        };
+        let indexes = SessionIndexes {
+            live: HashMap::from([(
+                "cwd-session".to_string(),
+                SessionMeta {
+                    cwd: Some("/tmp/from-index".to_string()),
+                    started_at: None,
+                    entrypoint: None,
+                },
+            )]),
+            project_summaries: HashMap::new(),
+        };
+        let raw = parse_claude_session_file(entry, mtime, &indexes, true).unwrap().unwrap();
+        assert_eq!(raw.directory.as_deref(), Some("/tmp/from-index"));
+        assert_eq!(raw.started_at, 1_776_074_400_000);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_claude_session_file_extracts_title_summary_and_duration() {
+        let root = temp_claude_root("metadata");
+        let project = root.join("projects").join("-tmp-meta");
+        fs::create_dir_all(&project).unwrap();
+        let path = project.join("meta-session.jsonl");
+        let lines = [
+            serde_json::json!({
+                "type": "user",
+                "message": {"content": "start"},
+                "timestamp": "2026-04-13T10:00:00Z"
+            }),
+            serde_json::json!({
+                "type": "custom-title",
+                "customTitle": "First title"
+            }),
+            serde_json::json!({
+                "type": "custom-title",
+                "customTitle": "Final title"
+            }),
+            serde_json::json!({
+                "type": "custom-title",
+                "customTitle": "   "
+            }),
+            serde_json::json!({
+                "type": "summary",
+                "summary": "   "
+            }),
+            serde_json::json!({
+                "type": "summary",
+                "summary": "First summary"
+            }),
+            serde_json::json!({
+                "type": "summary",
+                "summary": "Second summary"
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"content": "done"},
+                "timestamp": "2026-04-13T10:02:00Z"
+            }),
+        ];
+        let mut f = fs::File::create(&path).unwrap();
+        for line in lines {
+            writeln!(f, "{line}").unwrap();
+        }
+        let mtime = file_scan::stat_mtime_ms(&path).unwrap();
+
+        let entry = FileScanEntry {
+            session_id: "meta-session".to_string(),
+            stat_target: path,
+            directory: Some("/tmp/meta".to_string()),
+        };
+        let indexes = SessionIndexes::default();
+        let raw = parse_claude_session_file(entry, mtime, &indexes, true).unwrap().unwrap();
+
+        assert_eq!(raw.custom_title.as_deref(), Some("Final title"));
+        assert_eq!(raw.summary.as_deref(), Some("First summary"));
+        assert_eq!(raw.duration_minutes, Some(2));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_for_sync_uses_project_sessions_index_summary() {
+        let root = temp_claude_root("project-summary");
+        let project = root.join("projects").join("-tmp-index");
+        let _path = write_user_jsonl(&project, "index-session", "hello");
+        let index = serde_json::json!({
+            "version": 1,
+            "entries": [
+                {
+                    "sessionId": "index-session",
+                    "summary": "Project index summary"
+                }
+            ]
+        });
+        fs::write(project.join("sessions-index.json"), index.to_string()).unwrap();
+
+        let store = setup_store();
+        let result = scan_for_sync_impl(&root, &store, None, true).unwrap();
+
+        assert_eq!(result.sessions.len(), 1);
+        assert_eq!(result.sessions[0].summary.as_deref(), Some("Project index summary"));
+        assert_eq!(result.sessions[0].started_at, 1_776_074_400_000);
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -873,8 +1011,8 @@ mod tests {
             stat_target: path,
             directory: Some("/tmp/foo".to_string()),
         };
-        let session_index = HashMap::new();
-        let raw = parse_claude_session_file(entry, mtime, &session_index, true).unwrap().unwrap();
+        let indexes = SessionIndexes::default();
+        let raw = parse_claude_session_file(entry, mtime, &indexes, true).unwrap().unwrap();
 
         assert_eq!(raw.usage_events.len(), 1);
         let event = &raw.usage_events[0];
@@ -902,8 +1040,8 @@ mod tests {
             stat_target: path,
             directory: Some("/tmp/foo".to_string()),
         };
-        let session_index = HashMap::new();
-        let raw = parse_claude_session_file(entry, mtime, &session_index, true).unwrap().unwrap();
+        let indexes = SessionIndexes::default();
+        let raw = parse_claude_session_file(entry, mtime, &indexes, true).unwrap().unwrap();
 
         assert!(raw.messages.is_empty());
         assert_eq!(raw.started_at, 1_776_074_400_000);
@@ -941,7 +1079,8 @@ mod tests {
             stat_target: path,
             directory: Some("/tmp/foo".to_string()),
         };
-        let raw = parse_claude_session_file(entry, mtime, &HashMap::new(), true).unwrap().unwrap();
+        let indexes = SessionIndexes::default();
+        let raw = parse_claude_session_file(entry, mtime, &indexes, true).unwrap().unwrap();
 
         assert_eq!(raw.usage_events.len(), 1);
         assert_eq!(raw.usage_events[0].model, "gpt-5.5");
@@ -961,8 +1100,8 @@ mod tests {
         write_user_jsonl(&p2, "sess-2", "b");
         write_user_jsonl(&nested, "agent-a123", "nested");
 
-        let session_index = HashMap::new();
-        let entries = collect_project_entries(&root, &session_index);
+        let mut indexes = SessionIndexes::default();
+        let entries = collect_project_entries(&root, &mut indexes);
         assert_eq!(entries.len(), 3);
         let ids: Vec<_> = entries.iter().map(|e| e.session_id.clone()).collect();
         assert!(ids.contains(&"sess-1".to_string()));
@@ -1055,15 +1194,10 @@ mod tests {
 
     #[test]
     fn machinery_turn_keeps_usage_but_drops_message() {
-        // A sub-agent (isSidechain) assistant turn carries real billed
-        // tokens. It must NOT appear as a conversation message, but its
-        // usage event must still be captured (regression for the early
-        // machinery `continue` that dropped usage).
         let dir = std::env::temp_dir().join(format!("recall-mach-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("sess.jsonl");
         let mut f = fs::File::create(&path).unwrap();
-        // Normal user turn (visible) + a sidechain assistant turn with usage.
         writeln!(
             f,
             r#"{{"type":"user","message":{{"role":"user","content":"hi"}},"timestamp":"2026-05-20T10:00:00Z"}}"#
@@ -1077,12 +1211,10 @@ mod tests {
 
         let parsed = parse_conversation_jsonl(&path, 0, true).unwrap();
 
-        // The sidechain turn contributes no visible message …
         assert!(
             parsed.messages.iter().all(|m| m.content != "sub-agent work"),
             "machinery turn must not be a stored message"
         );
-        // … but its usage event is retained.
         assert!(
             !parsed.usage_events.is_empty(),
             "usage event from the machinery turn must be preserved"

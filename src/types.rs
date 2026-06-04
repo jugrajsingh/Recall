@@ -67,12 +67,8 @@ pub struct Session {
     pub updated_at: Option<i64>,
     pub message_count: u32,
     pub entrypoint: Option<String>,
-    /// `/rename` value from Claude Code (`type=custom-title` JSONL events).
-    /// When present, takes precedence over the derived `title`.
     pub custom_title: Option<String>,
-    /// Auto-generated session summary from Claude Code (`type=summary`).
     pub summary: Option<String>,
-    /// First→last message timestamp span in minutes, when computable.
     pub duration_minutes: Option<u32>,
 }
 

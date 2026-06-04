@@ -12,6 +12,25 @@ use crate::types::{
 };
 use crate::utils::f32_slice_to_bytes;
 
+pub(crate) const SESSION_COLUMNS: &str = "id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint, custom_title, summary, duration_minutes";
+
+pub(crate) fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
+    Ok(Session {
+        id: row.get(0)?,
+        source: row.get(1)?,
+        source_id: row.get(2)?,
+        title: row.get(3)?,
+        directory: row.get(4)?,
+        started_at: row.get(5)?,
+        updated_at: row.get(6)?,
+        message_count: row.get(7)?,
+        entrypoint: row.get(8)?,
+        custom_title: row.get(9)?,
+        summary: row.get(10)?,
+        duration_minutes: row.get::<_, Option<i64>>(11)?.map(|v| v as u32),
+    })
+}
+
 pub struct Store {
     pub conn: Connection,
 }
@@ -21,6 +40,13 @@ pub struct ProjectDirectory {
     pub directory: String,
     pub sessions: u64,
     pub last_seen: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPath {
+    pub source_id: String,
+    pub directory: Option<String>,
+    pub source_file_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -136,32 +162,34 @@ impl Store {
         rows.collect::<Result<HashMap<_, _>, _>>().map_err(Into::into)
     }
 
-    /// Update only the metadata columns on an existing session row, keyed
-    /// by (source, source_id). Used to backfill custom_title/summary/
-    /// duration_minutes when a session is reparsed but its conversation
-    /// content is unchanged (the BackfillOnly path), so migrated rows get
-    /// populated without rebuilding messages/FTS. Also refreshes the
-    /// displayed title from custom_title when present. Returns true if a
-    /// row was updated.
-    pub fn update_session_metadata(
+    pub fn update_session_fields(
         &self,
         source: &str,
         source_id: &str,
         custom_title: Option<&str>,
         summary: Option<&str>,
         duration_minutes: Option<u32>,
+        source_file_path: Option<&str>,
     ) -> Result<bool> {
         let n = self.conn.execute(
             "UPDATE sessions
-                SET custom_title = ?3,
-                    summary = ?4,
-                    duration_minutes = ?5,
+                SET custom_title = COALESCE(?3, custom_title),
+                    summary = COALESCE(?4, summary),
+                    duration_minutes = COALESCE(?5, duration_minutes),
+                    source_file_path = COALESCE(?6, source_file_path),
                     title = CASE
                         WHEN ?3 IS NOT NULL AND ?3 != '' THEN ?3
                         ELSE title
                     END
               WHERE source = ?1 AND source_id = ?2",
-            rusqlite::params![source, source_id, custom_title, summary, duration_minutes],
+            rusqlite::params![
+                source,
+                source_id,
+                custom_title,
+                summary,
+                duration_minutes,
+                source_file_path,
+            ],
         )?;
         Ok(n > 0)
     }
@@ -848,18 +876,18 @@ impl Store {
         Ok(SemanticProgress { current_session_title, ..progress })
     }
 
-    /// Every indexed session as `(source, source_id, directory)`. Lets the
-    /// pre-sync prune pass evaluate exclusion rules against rows already in
-    /// the DB — even ones the incremental scan would skip because their
-    /// file is unchanged.
-    pub fn all_session_paths(&self) -> Result<Vec<(String, String, Option<String>)>> {
-        let mut stmt = self.conn.prepare("SELECT source, source_id, directory FROM sessions")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
+    pub fn session_paths_for_source(&self, source: &str) -> Result<Vec<SessionPath>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_id, directory, source_file_path
+             FROM sessions
+             WHERE source = ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![source], |row| {
+            Ok(SessionPath {
+                source_id: row.get(0)?,
+                directory: row.get(1)?,
+                source_file_path: row.get(2)?,
+            })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -1017,7 +1045,7 @@ impl Store {
         let placeholders =
             std::iter::repeat_n("?", session_ids.len()).collect::<Vec<_>>().join(", ");
         let sql = format!(
-            "SELECT id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint, custom_title, summary, duration_minutes
+            "SELECT {SESSION_COLUMNS}
              FROM sessions
              WHERE id IN ({placeholders})
              ORDER BY started_at DESC"
@@ -1025,22 +1053,7 @@ impl Store {
         let mut stmt = self.conn.prepare(&sql)?;
         let params: Vec<&dyn rusqlite::types::ToSql> =
             session_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
-        let rows = stmt.query_map(params.as_slice(), |row| {
-            Ok(Session {
-                id: row.get(0)?,
-                source: row.get(1)?,
-                source_id: row.get(2)?,
-                title: row.get(3)?,
-                directory: row.get(4)?,
-                started_at: row.get(5)?,
-                updated_at: row.get(6)?,
-                message_count: row.get(7)?,
-                entrypoint: row.get(8)?,
-                custom_title: row.get(9).ok().flatten(),
-                summary: row.get(10).ok().flatten(),
-                duration_minutes: row.get::<_, Option<i64>>(11).ok().flatten().map(|v| v as u32),
-            })
-        })?;
+        let rows = stmt.query_map(params.as_slice(), session_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -1193,10 +1206,10 @@ impl Store {
         directory: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Session>> {
-        let mut sql = String::from(
-            "SELECT id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint, custom_title, summary, duration_minutes
+        let mut sql = format!(
+            "SELECT {SESSION_COLUMNS}
              FROM sessions s
-             WHERE 1=1",
+             WHERE 1=1"
         );
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut param_idx = 1;
@@ -1206,22 +1219,7 @@ impl Store {
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(param_refs.as_slice(), |row| {
-            Ok(Session {
-                id: row.get(0)?,
-                source: row.get(1)?,
-                source_id: row.get(2)?,
-                title: row.get(3)?,
-                directory: row.get(4)?,
-                started_at: row.get(5)?,
-                updated_at: row.get(6)?,
-                message_count: row.get(7)?,
-                entrypoint: row.get(8)?,
-                custom_title: row.get(9).ok().flatten(),
-                summary: row.get(10).ok().flatten(),
-                duration_minutes: row.get::<_, Option<i64>>(11).ok().flatten().map(|v| v as u32),
-            })
-        })?;
+        let rows = stmt.query_map(param_refs.as_slice(), session_from_row)?;
         let mut sessions = Vec::new();
         for row in rows {
             sessions.push(row?);
@@ -1236,10 +1234,10 @@ impl Store {
         directory: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<Session>> {
-        let mut sql = String::from(
-            "SELECT id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint, custom_title, summary, duration_minutes
+        let mut sql = format!(
+            "SELECT {SESSION_COLUMNS}
              FROM sessions s
-             WHERE 1=1",
+             WHERE 1=1"
         );
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut param_idx = 1;
@@ -1252,22 +1250,7 @@ impl Store {
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(param_refs.as_slice(), |row| {
-            Ok(Session {
-                id: row.get(0)?,
-                source: row.get(1)?,
-                source_id: row.get(2)?,
-                title: row.get(3)?,
-                directory: row.get(4)?,
-                started_at: row.get(5)?,
-                updated_at: row.get(6)?,
-                message_count: row.get(7)?,
-                entrypoint: row.get(8)?,
-                custom_title: row.get(9).ok().flatten(),
-                summary: row.get(10).ok().flatten(),
-                duration_minutes: row.get::<_, Option<i64>>(11).ok().flatten().map(|v| v as u32),
-            })
-        })?;
+        let rows = stmt.query_map(param_refs.as_slice(), session_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -1410,13 +1393,13 @@ mod exclusion_tests {
     use super::*;
     use crate::types::Session;
 
-    fn sess(id: &str, dir: &str) -> Session {
+    fn sess(id: &str, dir: Option<&str>) -> Session {
         Session {
             id: id.to_string(),
             source: "claude-code".to_string(),
             source_id: format!("src-{id}"),
             title: "t".to_string(),
-            directory: Some(dir.to_string()),
+            directory: dir.map(String::from),
             started_at: 0,
             updated_at: Some(1),
             message_count: 0,
@@ -1427,27 +1410,86 @@ mod exclusion_tests {
         }
     }
 
-    /// all_session_paths must surface every indexed row's directory so the
-    /// pre-sync exclusion pass can purge matches that incremental sync would
-    /// otherwise skip. Regression for the codex P1: excluded content stayed
-    /// searchable for unchanged sessions.
     #[test]
-    fn all_session_paths_round_trips_then_delete_clears() {
+    fn session_paths_for_source_round_trips_then_delete_clears() {
         crate::db::schema::register_sqlite_vec();
         let store = Store::open_in_memory().unwrap();
-        store.insert_session(&sess("a", "/home/u/proj")).unwrap();
-        store.insert_session(&sess("b", "/home/u/.claude-mem/observer-sessions/x")).unwrap();
+        store.insert_session(&sess("a", Some("/home/u/proj"))).unwrap();
+        store.insert_session(&sess("b", None)).unwrap();
+        store
+            .update_session_fields(
+                "claude-code",
+                "src-b",
+                None,
+                None,
+                None,
+                Some("/home/u/.claude-mem/observer-sessions/session.jsonl"),
+            )
+            .unwrap();
 
-        let paths = store.all_session_paths().unwrap();
+        let paths = store.session_paths_for_source("claude-code").unwrap();
         assert_eq!(paths.len(), 2);
-        let observer =
-            paths.iter().find(|(_, sid, _)| sid == "src-b").expect("observer session present");
-        assert_eq!(observer.2.as_deref(), Some("/home/u/.claude-mem/observer-sessions/x"));
+        let observer = paths.iter().find(|path| path.source_id == "src-b").unwrap();
+        assert_eq!(
+            observer.source_file_path.as_deref(),
+            Some("/home/u/.claude-mem/observer-sessions/session.jsonl")
+        );
 
-        // Simulate the pre-sync purge of the excluded row.
         store.delete_session_data("claude-code", "src-b").unwrap();
-        let after = store.all_session_paths().unwrap();
+        let after = store.session_paths_for_source("claude-code").unwrap();
         assert_eq!(after.len(), 1);
-        assert_eq!(after[0].1, "src-a");
+        assert_eq!(after[0].source_id, "src-a");
+    }
+
+    #[test]
+    fn update_session_fields_does_not_clear_metadata() {
+        crate::db::schema::register_sqlite_vec();
+        let store = Store::open_in_memory().unwrap();
+        let mut session = sess("a", None);
+        session.custom_title = Some("Keep title".to_string());
+        session.summary = Some("Keep summary".to_string());
+        session.duration_minutes = Some(9);
+        store.insert_session(&session).unwrap();
+
+        store
+            .update_session_fields(
+                "claude-code",
+                "src-a",
+                None,
+                None,
+                None,
+                Some("/home/u/observer-sessions/session.jsonl"),
+            )
+            .unwrap();
+
+        let paths = store.session_paths_for_source("claude-code").unwrap();
+        assert_eq!(
+            paths[0].source_file_path.as_deref(),
+            Some("/home/u/observer-sessions/session.jsonl")
+        );
+        let sessions = store.list_sessions_by_ids(&["a".to_string()]).unwrap();
+        assert_eq!(sessions[0].custom_title.as_deref(), Some("Keep title"));
+        assert_eq!(sessions[0].summary.as_deref(), Some("Keep summary"));
+        assert_eq!(sessions[0].duration_minutes, Some(9));
+    }
+
+    #[test]
+    fn update_session_fields_preserves_unset_fields() {
+        crate::db::schema::register_sqlite_vec();
+        let store = Store::open_in_memory().unwrap();
+        let mut session = sess("a", None);
+        session.summary = Some("Keep summary".to_string());
+        session.duration_minutes = Some(9);
+        store.insert_session(&session).unwrap();
+
+        store
+            .update_session_fields("claude-code", "src-a", Some("New title"), None, None, None)
+            .unwrap();
+
+        let sessions = store.list_sessions_by_ids(&["a".to_string()]).unwrap();
+        assert_eq!(sessions[0].title, "New title");
+        assert_eq!(sessions[0].custom_title.as_deref(), Some("New title"));
+        assert_eq!(sessions[0].summary.as_deref(), Some("Keep summary"));
+        assert_eq!(sessions[0].duration_minutes, Some(9));
     }
 }

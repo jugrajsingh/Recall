@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 #[allow(clippy::missing_transmute_annotations)]
 pub fn register_sqlite_vec() {
@@ -30,6 +30,9 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
     }
     if version < 6 {
         migrate_v6(conn)?;
+    }
+    if version < 7 {
+        migrate_v7(conn)?;
     }
     Ok(())
 }
@@ -253,29 +256,31 @@ fn migrate_v5(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Fork addition: session metadata columns (`custom_title`, `summary`,
-/// `duration_minutes`). A dedicated migration so existing v5 databases
-/// from upstream — which already sit at `user_version = 5` and therefore
-/// skip every `migrate_v1..v5` — still receive the new columns.
-///
-/// `ALTER TABLE … ADD COLUMN` is not idempotent in SQLite, so we tolerate
-/// the "duplicate column name" error per statement (covers the case where
-/// a prior partial run already added one). `PRAGMA user_version = 6` is set
-/// only after all three succeed.
 fn migrate_v6(conn: &Connection) -> anyhow::Result<()> {
     for stmt in [
         "ALTER TABLE sessions ADD COLUMN custom_title TEXT",
         "ALTER TABLE sessions ADD COLUMN summary TEXT",
         "ALTER TABLE sessions ADD COLUMN duration_minutes INTEGER",
     ] {
-        if let Err(err) = conn.execute(stmt, []) {
-            let msg = err.to_string();
-            if !msg.contains("duplicate column name") {
-                return Err(err.into());
-            }
-        }
+        add_column_if_missing(conn, stmt)?;
     }
     conn.execute_batch("PRAGMA user_version = 6;")?;
+    Ok(())
+}
+
+fn migrate_v7(conn: &Connection) -> anyhow::Result<()> {
+    add_column_if_missing(conn, "ALTER TABLE sessions ADD COLUMN source_file_path TEXT")?;
+    conn.execute_batch("PRAGMA user_version = 7;")?;
+    Ok(())
+}
+
+fn add_column_if_missing(conn: &Connection, stmt: &str) -> anyhow::Result<()> {
+    if let Err(err) = conn.execute(stmt, []) {
+        let msg = err.to_string();
+        if !msg.contains("duplicate column name") {
+            return Err(err.into());
+        }
+    }
     Ok(())
 }
 
@@ -291,15 +296,9 @@ pub const fn current_schema_version() -> i64 {
 mod tests {
     use super::*;
 
-    /// Simulates an existing upstream v0.2.4 database (already at
-    /// user_version = 5, sessions table WITHOUT the fork's metadata
-    /// columns) and verifies init() upgrades it to v6 by adding them.
-    /// Regression for the codex finding: v5 DBs skipped migrate_v5 and
-    /// never got custom_title/summary/duration_minutes.
     #[test]
     fn migrate_v6_adds_metadata_columns_to_existing_v5_db() {
         let conn = Connection::open_in_memory().unwrap();
-        // Recreate a minimal v5-era sessions table (pre-fork columns only).
         conn.execute_batch(
             "CREATE TABLE sessions (
                 id TEXT PRIMARY KEY, source TEXT NOT NULL, source_id TEXT NOT NULL,
@@ -313,8 +312,7 @@ mod tests {
 
         init(&conn).unwrap();
 
-        assert_eq!(schema_version(&conn).unwrap(), 6);
-        // Each new column must now be selectable.
+        assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
         for col in ["custom_title", "summary", "duration_minutes"] {
             let sql = format!("SELECT {col} FROM sessions");
             conn.prepare(&sql)
@@ -322,7 +320,28 @@ mod tests {
         }
     }
 
-    /// init() must be safe to run repeatedly — second call is a no-op.
+    #[test]
+    fn migrate_v7_adds_source_file_path_to_existing_v6_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, source TEXT NOT NULL, source_id TEXT NOT NULL,
+                title TEXT NOT NULL, directory TEXT, started_at INTEGER NOT NULL,
+                updated_at INTEGER, message_count INTEGER NOT NULL DEFAULT 0,
+                entrypoint TEXT, custom_title TEXT, summary TEXT,
+                duration_minutes INTEGER, UNIQUE(source, source_id)
+            );
+            PRAGMA user_version = 6;",
+        )
+        .unwrap();
+
+        init(&conn).unwrap();
+
+        assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        conn.prepare("SELECT source_file_path FROM sessions")
+            .unwrap_or_else(|e| panic!("column source_file_path missing after migrate_v7: {e}"));
+    }
+
     #[test]
     fn init_is_idempotent() {
         register_sqlite_vec();

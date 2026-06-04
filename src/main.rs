@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use anyhow::Result;
@@ -393,24 +394,6 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
     let mut filtered_out = 0u32;
     let mut excluded_out = 0u32;
 
-    // Indexed sessions whose directory now matches an excluded_paths rule,
-    // grouped by source. We purge these per-source INSIDE the loop below,
-    // after the scope filters, so a scoped/usage-only sync only mutates the
-    // sources it actually processes. This must happen regardless of the
-    // incremental scan (which skips unchanged files) — otherwise a session
-    // indexed before the rule was added would stay searchable.
-    let mut excluded_by_source: std::collections::HashMap<
-        String,
-        std::collections::HashSet<String>,
-    > = Default::default();
-    if let Some(matcher) = &path_excluder {
-        for (source, source_id, directory) in store.all_session_paths()? {
-            if directory.as_deref().is_some_and(|d| matcher.is_match(d)) {
-                excluded_by_source.entry(source).or_default().insert(source_id);
-            }
-        }
-    }
-
     for adapter in &all {
         let source_id = adapter.id();
         let label = adapter.label();
@@ -437,15 +420,14 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
             continue;
         }
 
-        // Purge already-indexed rows for this in-scope source whose cwd now
-        // matches an excluded_paths rule (handles sessions the incremental
-        // scan would otherwise skip). Runs only for sources this sync
-        // actually processes — past all the scope filters above.
-        if let Some(ids) = excluded_by_source.get(source_id) {
-            for sid in ids {
-                store.delete_session_data(source_id, sid)?;
-                excluded_out += 1;
-            }
+        let mut purged_excluded_ids = HashSet::new();
+        if let Some(matcher) = &path_excluder {
+            excluded_out += delete_excluded_sessions_for_source(
+                &store,
+                source_id,
+                matcher,
+                &mut purged_excluded_ids,
+            )?;
         }
 
         if options.verbose {
@@ -484,6 +466,14 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
         };
         skipped += pre_skipped;
         filtered_out += pre_filtered;
+        if let Some(matcher) = &path_excluder {
+            excluded_out += delete_excluded_sessions_for_source(
+                &store,
+                source_id,
+                matcher,
+                &mut purged_excluded_ids,
+            )?;
+        }
         if options.verbose {
             println!("  Found {} sessions", raw_sessions.len());
         }
@@ -505,30 +495,27 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
                 }
             }
 
-            // Drop sessions whose cwd matches any excluded_paths glob.
-            // Sessions with no `directory` (e.g. observer-style sessions
-            // identified only by file path) can't be matched here; once a
-            // `source_file_path` field lands on RawSession, extend this arm too.
-            // Indexed rows are purged in the pre-sync pass above; this arm
-            // catches new/changed sessions from the current scan (e.g. --force).
+            let raw_source_id = raw.source_id.clone();
+
             if let Some(matcher) = &path_excluder
-                && let Some(dir) = raw.directory.as_deref()
-                && matcher.is_match(dir)
+                && paths_match_excluded(
+                    raw.directory.as_deref(),
+                    raw.source_file_path.as_deref(),
+                    matcher,
+                )
             {
-                if existing_meta.remove(&raw.source_id).is_some() {
-                    store.delete_session_data(source_id, &raw.source_id)?;
-                    existing_usage_meta.remove(&raw.source_id);
-                    existing_event_meta.remove(&raw.source_id);
-                } else if !excluded_by_source
-                    .get(source_id)
-                    .is_some_and(|ids| ids.contains(&raw.source_id))
-                {
+                if existing_meta.remove(&raw_source_id).is_some() {
+                    store.delete_session_data(source_id, &raw_source_id)?;
+                    existing_usage_meta.remove(&raw_source_id);
+                    existing_event_meta.remove(&raw_source_id);
+                }
+                if purged_excluded_ids.insert(raw_source_id) {
                     excluded_out += 1;
                 }
                 continue;
             }
 
-            let raw_source_id = raw.source_id.clone();
+            let raw_source_file_path = raw.source_file_path.clone();
             let msg_count = raw.messages.len() as u32;
             let usage_backfill_needed = raw.usage_parser_version.is_some_and(|version| {
                 !usage_state_is_current(
@@ -575,7 +562,7 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
                                 )?
                             {
                                 existing_usage_meta.insert(
-                                    raw.source_id.clone(),
+                                    raw_source_id.clone(),
                                     UsageSessionStateMeta {
                                         parser_version,
                                         source_updated_at: raw.updated_at,
@@ -594,7 +581,7 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
                                 )?
                             {
                                 existing_event_meta.insert(
-                                    raw.source_id.clone(),
+                                    raw_source_id.clone(),
                                     EventSessionStateMeta {
                                         parser_version,
                                         source_updated_at: raw.updated_at,
@@ -602,21 +589,17 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
                                 );
                                 reprocessed = true;
                             }
-                            // Backfill the metadata columns on the existing
-                            // row (cheap targeted UPDATE — no message/FTS
-                            // rebuild). Covers migrated rows that parse anew
-                            // via the parser-version bump but whose content
-                            // is unchanged, so they don't keep NULL metadata.
                             if raw.custom_title.is_some()
                                 || raw.summary.is_some()
                                 || raw.duration_minutes.is_some()
                             {
-                                store.update_session_metadata(
+                                store.update_session_fields(
                                     source_id,
                                     &raw_source_id,
                                     raw.custom_title.as_deref(),
                                     raw.summary.as_deref(),
                                     raw.duration_minutes,
+                                    None,
                                 )?;
                             }
                             if reprocessed {
@@ -640,7 +623,6 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
             }
 
             let session_uuid = uuid::Uuid::new_v4().to_string();
-            // custom_title overrides derived title when present.
             let title = raw
                 .custom_title
                 .clone()
@@ -690,6 +672,16 @@ fn run_sync_job_inner(options: SyncRunOptions) -> Result<()> {
                 &events,
                 event_parser_version,
             )?;
+            if let Some(source_file_path) = raw_source_file_path.as_deref() {
+                store.update_session_fields(
+                    source_id,
+                    &session.source_id,
+                    None,
+                    None,
+                    None,
+                    Some(source_file_path),
+                )?;
+            }
             existing_meta
                 .insert(session.source_id.clone(), (session.updated_at, session.message_count));
             if let Some(parser_version) = raw.usage_parser_version {
@@ -1204,12 +1196,79 @@ fn generate_title(messages: &[adapters::RawMessage]) -> String {
     utils::title_from_user_messages(&user_contents)
 }
 
+fn delete_excluded_sessions_for_source(
+    store: &Store,
+    source_id: &str,
+    matcher: &globset::GlobSet,
+    deleted: &mut HashSet<String>,
+) -> Result<u32> {
+    let mut count = 0;
+    for path in store.session_paths_for_source(source_id)? {
+        if paths_match_excluded(
+            path.directory.as_deref(),
+            path.source_file_path.as_deref(),
+            matcher,
+        ) {
+            let source_id_to_delete = path.source_id;
+            store.delete_session_data(source_id, &source_id_to_delete)?;
+            if deleted.insert(source_id_to_delete) {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
+fn paths_match_excluded(
+    directory: Option<&str>,
+    source_file_path: Option<&str>,
+    matcher: &globset::GlobSet,
+) -> bool {
+    directory.is_some_and(|path| matcher.is_match(path))
+        || source_file_path.is_some_and(|path| path_or_ancestor_matches(path, matcher))
+}
+
+fn path_or_ancestor_matches(path: &str, matcher: &globset::GlobSet) -> bool {
+    let path = std::path::Path::new(path);
+    path.ancestors().any(|candidate| matcher.is_match(candidate))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BackfillPlan, ExistingSessionAction, decide_existing_session_action};
+    use std::collections::HashSet;
+
+    use super::{
+        BackfillPlan, ExistingSessionAction, decide_existing_session_action,
+        delete_excluded_sessions_for_source,
+    };
     use recall::adapters::{
         adapter_supports_usage_dashboard, all_adapters, source_supports_event_backfill,
     };
+    use recall::db::{schema, store::Store};
+    use recall::types::Session;
+
+    fn matcher(pattern: &str) -> globset::GlobSet {
+        let mut builder = globset::GlobSetBuilder::new();
+        builder.add(globset::Glob::new(pattern).unwrap());
+        builder.build().unwrap()
+    }
+
+    fn session(id: &str, source: &str, source_id: &str) -> Session {
+        Session {
+            id: id.to_string(),
+            source: source.to_string(),
+            source_id: source_id.to_string(),
+            title: "t".to_string(),
+            directory: None,
+            started_at: 0,
+            updated_at: Some(1),
+            message_count: 0,
+            entrypoint: None,
+            custom_title: None,
+            summary: None,
+            duration_minutes: None,
+        }
+    }
 
     #[test]
     fn dashboard_sync_skips_sources_without_usage_or_events() {
@@ -1269,5 +1328,32 @@ mod tests {
             decide_existing_session_action(false, false, false, false, false, false),
             ExistingSessionAction::Skip
         );
+    }
+
+    #[test]
+    fn delete_excluded_sessions_for_source_uses_persisted_source_file_path() {
+        schema::register_sqlite_vec();
+        let matcher = matcher("**/observer-sessions");
+        let store = Store::open_in_memory().unwrap();
+        store.insert_session(&session("id-1", "claude-code", "s1")).unwrap();
+        store
+            .update_session_fields(
+                "claude-code",
+                "s1",
+                None,
+                None,
+                None,
+                Some("/tmp/observer-sessions/session.jsonl"),
+            )
+            .unwrap();
+
+        let mut deleted = HashSet::new();
+        let count =
+            delete_excluded_sessions_for_source(&store, "claude-code", &matcher, &mut deleted)
+                .unwrap();
+
+        assert_eq!(count, 1);
+        assert!(deleted.contains("s1"));
+        assert!(store.session_paths_for_source("claude-code").unwrap().is_empty());
     }
 }

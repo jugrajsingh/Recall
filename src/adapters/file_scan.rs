@@ -69,6 +69,19 @@ where
             continue;
         };
 
+        if existing.contains_key(&entry.session_id)
+            && let Some(source_file_path) = entry.stat_target.to_str()
+        {
+            store.update_session_fields(
+                source_id,
+                &entry.session_id,
+                None,
+                None,
+                None,
+                Some(source_file_path),
+            )?;
+        }
+
         if let Some(cutoff) = since_ts
             && mtime_ms < cutoff
         {
@@ -249,6 +262,9 @@ mod tests {
 
         assert_eq!(result.sessions.len(), 0);
         assert_eq!(result.stats.skipped_sessions, 1);
+        let paths = store.session_paths_for_source("test-source").unwrap();
+        let stored = paths.iter().find(|path| path.source_id == "sess-skip").unwrap();
+        assert_eq!(stored.source_file_path.as_deref(), path.to_str());
         let _ = fs::remove_file(&path);
     }
 
@@ -387,6 +403,7 @@ mod tests {
         let path = temp_file_with_mtime("old");
         let mtime_ms = stat_mtime_ms(&path).unwrap();
         let future_cutoff = mtime_ms + 10_000_000;
+        store.insert_session(&make_session("s1", "sess-old", Some(mtime_ms), 1)).unwrap();
 
         let entry = FileScanEntry {
             session_id: "sess-old".to_string(),
@@ -402,6 +419,9 @@ mod tests {
 
         assert_eq!(result.sessions.len(), 0);
         assert_eq!(result.stats.filtered_sessions, 1);
+        let paths = store.session_paths_for_source("test-source").unwrap();
+        let stored = paths.iter().find(|path| path.source_id == "sess-old").unwrap();
+        assert_eq!(stored.source_file_path.as_deref(), path.to_str());
         let _ = fs::remove_file(&path);
     }
 

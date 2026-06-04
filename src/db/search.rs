@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use chrono::{Local, TimeZone};
 use rusqlite::Connection;
 
+use crate::db::store::{SESSION_COLUMNS, session_from_row};
 use crate::types::{MatchSource, SearchResult, Session};
 use crate::utils::f32_slice_to_bytes;
 
@@ -177,7 +178,7 @@ impl<'a> SearchEngine<'a> {
 
         let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
-            "SELECT id, source, source_id, title, directory, started_at, updated_at, message_count, entrypoint, custom_title, summary, duration_minutes
+            "SELECT {SESSION_COLUMNS}
              FROM sessions WHERE id IN ({})",
             placeholders.join(", ")
         );
@@ -186,22 +187,7 @@ impl<'a> SearchEngine<'a> {
             ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params.as_slice(), |row| {
-            Ok(Session {
-                id: row.get(0)?,
-                source: row.get(1)?,
-                source_id: row.get(2)?,
-                title: row.get(3)?,
-                directory: row.get(4)?,
-                started_at: row.get(5)?,
-                updated_at: row.get(6)?,
-                message_count: row.get(7)?,
-                entrypoint: row.get(8)?,
-                custom_title: row.get(9).ok().flatten(),
-                summary: row.get(10).ok().flatten(),
-                duration_minutes: row.get::<_, Option<i64>>(11).ok().flatten().map(|v| v as u32),
-            })
-        })?;
+        let rows = stmt.query_map(params.as_slice(), session_from_row)?;
 
         for row in rows {
             let session = row?;
