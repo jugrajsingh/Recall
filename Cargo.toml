@@ -1,6 +1,6 @@
 [package]
 name = "recall"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2024"
 license = "MIT"
 description = "Unified search, usage tracking, and JSONL export for AI coding sessions"
