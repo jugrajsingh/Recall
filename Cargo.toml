@@ -17,9 +17,9 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sqlite-vec = "0.1"
-hf-hub = { version = "0.5", features = ["ureq"] }
+hf-hub = { version = "0.5", features = ["ureq"], optional = true }
 ureq = "3"
-tokenizers = { version = "0.22", default-features = false }
+tokenizers = { version = "0.22", default-features = false, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
@@ -41,23 +41,45 @@ unicode-width = "0.2"
 fs2 = "0.4"
 pulldown-cmark = "0.13"
 zip = { version = "7", default-features = false, features = ["deflate"] }
+fastembed = { version = "5", default-features = false, features = [
+    "hf-hub-rustls-tls",
+    "ort-download-binaries-rustls-tls",
+], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-candle-core = { version = "0.10", features = ["metal"] }
-candle-nn = { version = "0.10", features = ["metal"] }
-candle-transformers = { version = "0.10", features = ["metal"] }
+candle-core = { version = "0.10", features = ["metal"], optional = true }
+candle-nn = { version = "0.10", features = ["metal"], optional = true }
+candle-transformers = { version = "0.10", features = ["metal"], optional = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-candle-core = "0.10"
-candle-nn = "0.10"
-candle-transformers = "0.10"
+candle-core = { version = "0.10", optional = true }
+candle-nn = { version = "0.10", optional = true }
+candle-transformers = { version = "0.10", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [features]
-default = []
-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+default = ["semantic-candle"]
+
+# Marker: gates all embedding code + semantic call sites. Implied by each backend.
+semantic-search = []
+
+# Pure-Rust candle backend (default). Honors MODEL_REVISION supply-chain pin.
+semantic-candle = [
+    "semantic-search",
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:hf-hub",
+    "dep:tokenizers",
+]
+
+# Opt-in ONNX Runtime backend. Downloads libonnxruntime at build time (needs network).
+# Cannot honor MODEL_REVISION (fastembed manages its own model download). Wins if both on.
+semantic-fastembed = ["semantic-search", "dep:fastembed"]
+
+cuda = ["semantic-candle", "candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 
 [profile.release]
 opt-level = 3
