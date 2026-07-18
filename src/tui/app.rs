@@ -2134,9 +2134,16 @@ impl App {
     }
 
     fn semantic_ready(&self) -> bool {
-        !self.embedding_unavailable
-            && (self.semantic_progress.done_sessions > 0
-                || self.semantic_progress.processing_sessions > 0)
+        #[cfg(not(feature = "semantic-search"))]
+        {
+            return false;
+        }
+        #[cfg(feature = "semantic-search")]
+        {
+            !self.embedding_unavailable
+                && (self.semantic_progress.done_sessions > 0
+                    || self.semantic_progress.processing_sessions > 0)
+        }
     }
 
     fn refresh_semantic_progress(&mut self, store: &Store) {

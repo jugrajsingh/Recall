@@ -3,6 +3,7 @@ use anyhow::Result;
 use crate::adapters;
 use crate::db::search::{SearchEngine, SearchFilters, TimeRange};
 use crate::db::store::Store;
+#[cfg(feature = "semantic-search")]
 use crate::embedding::EmbeddingProvider;
 use crate::session::{self, SessionListFormat, SessionSort};
 use crate::types;
@@ -106,6 +107,7 @@ pub(crate) fn parse_time_range(time_filter: Option<&str>) -> TimeRange {
     }
 }
 
+#[cfg(feature = "semantic-search")]
 pub(crate) fn query_embedding<F>(
     store: &Store,
     query: &str,
@@ -133,4 +135,12 @@ where
             Ok(None)
         }
     }
+}
+
+#[cfg(not(feature = "semantic-search"))]
+pub(crate) fn query_embedding<F>(_store: &Store, _query: &str, _emit: F) -> Result<Option<Vec<f32>>>
+where
+    F: FnMut(&str),
+{
+    Ok(None) // FTS-only: no query vector
 }

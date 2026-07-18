@@ -4,6 +4,7 @@ use crate::adapters;
 use crate::config::AppConfig;
 use crate::db::search::TimeRange;
 use crate::db::store::Store;
+#[cfg(feature = "semantic-search")]
 use crate::semantic;
 use crate::sync::run_dashboard_sync_job;
 use crate::tui::search_worker::SearchWorker;
@@ -26,6 +27,7 @@ pub(crate) fn run(usage_start: Option<(Option<Vec<String>>, Option<TimeRange>)>)
 
     let usage_mode = usage_start.is_some();
     let store = Store::open()?;
+    #[cfg(feature = "semantic-search")]
     if !cfg!(debug_assertions) {
         semantic::ensure_background_worker(true)?;
     }
@@ -56,6 +58,7 @@ pub(crate) fn run(usage_start: Option<(Option<Vec<String>>, Option<TimeRange>)>)
     config.normalize_sources(&sources);
 
     let mut app = App::new(&store, sources, config);
+    #[cfg(feature = "semantic-search")]
     if cfg!(debug_assertions) {
         app.status_message =
             Some("Debug builds do not start semantic indexing; run cargo run -- sync first".into());

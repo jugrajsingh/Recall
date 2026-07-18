@@ -63,8 +63,14 @@ pub(crate) fn run_dashboard_sync_job() -> Result<()> {
     })
 }
 
+#[cfg(feature = "semantic-search")]
 pub(crate) fn run_background_worker(sync_first: bool) -> Result<()> {
     semantic::run_background_worker(sync_first, || run_sync_job(false, false))
+}
+
+#[cfg(not(feature = "semantic-search"))]
+pub(crate) fn run_background_worker(_sync_first: bool) -> Result<()> {
+    anyhow::bail!("recall-mini has no embedding backend; background worker is unavailable")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

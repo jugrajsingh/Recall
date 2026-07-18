@@ -1,19 +1,30 @@
+#[cfg(feature = "semantic-search")]
 use std::path::{Path, PathBuf};
+#[cfg(feature = "semantic-search")]
 use std::time::Instant;
 
 use anyhow::Result;
+#[cfg(feature = "semantic-search")]
 use rusqlite::OptionalExtension;
+#[cfg(feature = "semantic-search")]
 use serde::Deserialize;
 
+#[cfg(feature = "semantic-search")]
 use crate::db::search::{SearchEngine, SearchFilters, TimeRange};
 use crate::db::store::Store;
+#[cfg(feature = "semantic-search")]
 use crate::embedding::EmbeddingProvider;
+#[cfg(feature = "semantic-search")]
 use crate::semantic::build_embedding_text;
+#[cfg(feature = "semantic-search")]
 use crate::types::SearchResult;
+#[cfg(feature = "semantic-search")]
 use crate::utils::f32_slice_to_bytes;
 
+#[cfg(feature = "semantic-search")]
 const EVAL_TOP_K_MAX: usize = 20;
 
+#[cfg(feature = "semantic-search")]
 pub(crate) fn run_semantic() -> Result<()> {
     println!("=== Recall Semantic Pipeline Benchmark ===\n");
 
@@ -151,6 +162,7 @@ pub(crate) fn run_semantic() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "semantic-search")]
 pub(crate) fn run_search(query: &str) -> Result<()> {
     println!("=== Recall Search Cold-Path Benchmark ===\n");
     println!("  query: {query}\n");
@@ -197,6 +209,7 @@ pub(crate) fn run_search(query: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "semantic-search")]
 fn time_upsert_current(store: &Store, items: &[(i64, &[f32])]) -> Result<u128> {
     store.conn.execute_batch("BEGIN")?;
     let t0 = Instant::now();
@@ -216,6 +229,7 @@ fn time_upsert_current(store: &Store, items: &[(i64, &[f32])]) -> Result<u128> {
     Ok(us)
 }
 
+#[cfg(feature = "semantic-search")]
 fn time_upsert_plain(store: &Store, items: &[(i64, &[f32])]) -> Result<u128> {
     store.conn.execute_batch("BEGIN")?;
     let t0 = Instant::now();
@@ -233,12 +247,14 @@ fn time_upsert_plain(store: &Store, items: &[(i64, &[f32])]) -> Result<u128> {
     Ok(us)
 }
 
+#[cfg(feature = "semantic-search")]
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ExpectedSession {
     pub(crate) source: String,
     pub(crate) source_id: String,
 }
 
+#[cfg(feature = "semantic-search")]
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct EvalEntry {
     pub(crate) query: String,
@@ -248,6 +264,7 @@ pub(crate) struct EvalEntry {
     pub(crate) notes: Option<String>,
 }
 
+#[cfg(feature = "semantic-search")]
 #[derive(Debug, Clone)]
 pub(crate) struct EvalFailure {
     pub(crate) query: String,
@@ -255,6 +272,7 @@ pub(crate) struct EvalFailure {
     pub(crate) expected: Vec<ExpectedSession>,
 }
 
+#[cfg(feature = "semantic-search")]
 #[derive(Debug, Clone)]
 pub(crate) struct ResultSummary {
     pub(crate) rank: usize,
@@ -265,6 +283,7 @@ pub(crate) struct ResultSummary {
     pub(crate) is_expected: bool,
 }
 
+#[cfg(feature = "semantic-search")]
 #[derive(Debug, Clone)]
 pub(crate) struct QueryDetail {
     pub(crate) query: String,
@@ -274,6 +293,7 @@ pub(crate) struct QueryDetail {
     pub(crate) top_results: Vec<ResultSummary>,
 }
 
+#[cfg(feature = "semantic-search")]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EvalReport {
     pub(crate) total: usize,
@@ -284,6 +304,7 @@ pub(crate) struct EvalReport {
     pub(crate) details: Vec<QueryDetail>,
 }
 
+#[cfg(feature = "semantic-search")]
 impl EvalReport {
     pub(crate) fn mrr(&self) -> f64 {
         if self.total == 0 { 0.0 } else { self.mrr_sum / self.total as f64 }
@@ -298,10 +319,12 @@ impl EvalReport {
     }
 }
 
+#[cfg(feature = "semantic-search")]
 fn pct(num: usize, denom: usize) -> f64 {
     if denom == 0 { 0.0 } else { (num as f64) * 100.0 / denom as f64 }
 }
 
+#[cfg(feature = "semantic-search")]
 pub(crate) fn evaluate<F>(
     engine: &SearchEngine,
     entries: &[EvalEntry],
@@ -360,6 +383,7 @@ where
     Ok(report)
 }
 
+#[cfg(feature = "semantic-search")]
 fn find_best_rank(results: &[SearchResult], expected: &[ExpectedSession]) -> Option<usize> {
     for (i, result) in results.iter().enumerate() {
         if is_expected(result, expected) {
@@ -369,16 +393,19 @@ fn find_best_rank(results: &[SearchResult], expected: &[ExpectedSession]) -> Opt
     None
 }
 
+#[cfg(feature = "semantic-search")]
 fn count_expected_hits(results: &[SearchResult], expected: &[ExpectedSession]) -> usize {
     results.iter().filter(|r| is_expected(r, expected)).count()
 }
 
+#[cfg(feature = "semantic-search")]
 fn is_expected(result: &SearchResult, expected: &[ExpectedSession]) -> bool {
     expected
         .iter()
         .any(|e| e.source == result.session.source && e.source_id == result.session.source_id)
 }
 
+#[cfg(feature = "semantic-search")]
 fn build_result_summaries(
     results: &[SearchResult],
     expected: &[ExpectedSession],
@@ -403,6 +430,7 @@ fn build_result_summaries(
         .collect()
 }
 
+#[cfg(feature = "semantic-search")]
 pub(crate) fn run_eval(dataset_override: Option<&str>, verbose: bool) -> Result<()> {
     let dataset_path = resolve_dataset_path(dataset_override)?;
     let entries = load_dataset(&dataset_path)?;
@@ -449,6 +477,7 @@ pub(crate) fn run_eval(dataset_override: Option<&str>, verbose: bool) -> Result<
     Ok(())
 }
 
+#[cfg(feature = "semantic-search")]
 fn print_report(report: &EvalReport, top_k_max: usize, verbose: bool) {
     if verbose {
         print_per_query_details(report, top_k_max);
@@ -477,6 +506,7 @@ fn print_report(report: &EvalReport, top_k_max: usize, verbose: bool) {
     }
 }
 
+#[cfg(feature = "semantic-search")]
 fn print_per_query_details(report: &EvalReport, top_k_max: usize) {
     for (idx, detail) in report.details.iter().enumerate() {
         let rank_label = match detail.best_rank {
@@ -506,6 +536,7 @@ fn print_per_query_details(report: &EvalReport, top_k_max: usize) {
     }
 }
 
+#[cfg(feature = "semantic-search")]
 fn shorten_title(title: &str, max_chars: usize) -> String {
     let flat: String =
         title.chars().map(|c| if c.is_whitespace() || c.is_control() { ' ' } else { c }).collect();
@@ -518,6 +549,7 @@ fn shorten_title(title: &str, max_chars: usize) -> String {
     }
 }
 
+#[cfg(feature = "semantic-search")]
 fn resolve_dataset_path(override_path: Option<&str>) -> Result<PathBuf> {
     if let Some(p) = override_path {
         return Ok(PathBuf::from(p));
@@ -528,6 +560,7 @@ fn resolve_dataset_path(override_path: Option<&str>) -> Result<PathBuf> {
     Ok(data_dir.join("search-eval.json"))
 }
 
+#[cfg(feature = "semantic-search")]
 fn load_dataset(path: &Path) -> Result<Vec<EvalEntry>> {
     if !path.exists() {
         anyhow::bail!(

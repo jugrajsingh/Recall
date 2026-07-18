@@ -249,10 +249,19 @@ pub(crate) fn run() -> Result<()> {
         Some(Commands::BackgroundWorker { sync_first }) => {
             crate::sync::run_background_worker(sync_first)?
         }
+        #[cfg(feature = "semantic-search")]
         Some(Commands::BenchSemantic) => crate::bench::run_semantic()?,
+        #[cfg(feature = "semantic-search")]
         Some(Commands::BenchSearch { query }) => crate::bench::run_search(&query)?,
+        #[cfg(feature = "semantic-search")]
         Some(Commands::BenchEval { dataset, verbose }) => {
             crate::bench::run_eval(dataset.as_deref(), verbose)?
+        }
+        #[cfg(not(feature = "semantic-search"))]
+        Some(
+            Commands::BenchSemantic | Commands::BenchSearch { .. } | Commands::BenchEval { .. },
+        ) => {
+            anyhow::bail!("benchmarks require an embedding backend; not available in recall-mini")
         }
         Some(Commands::BenchDumpSessions) => crate::bench::dump_sessions()?,
         Some(Commands::Search { query, source, time, project, repo, format }) => {

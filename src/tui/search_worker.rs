@@ -3,6 +3,7 @@ use std::thread;
 
 use crate::db::search::{SearchEngine, SearchFilters};
 use crate::db::store::Store;
+#[cfg(feature = "semantic-search")]
 use crate::embedding::EmbeddingProvider;
 use crate::types::{MatchSource, SearchResult};
 
@@ -72,7 +73,9 @@ fn run_worker(request_rx: Receiver<SearchRequest>, response_tx: Sender<SearchRes
     };
 
     let engine = SearchEngine::new(&store.conn);
+    #[cfg(feature = "semantic-search")]
     let mut provider = None;
+    #[cfg(feature = "semantic-search")]
     let mut embedding_unavailable = false;
 
     while let Ok(mut request) = request_rx.recv() {
@@ -80,6 +83,7 @@ fn run_worker(request_rx: Receiver<SearchRequest>, response_tx: Sender<SearchRes
             request = next;
         }
 
+        #[cfg(feature = "semantic-search")]
         run_request(
             &store,
             &engine,
@@ -88,9 +92,12 @@ fn run_worker(request_rx: Receiver<SearchRequest>, response_tx: Sender<SearchRes
             request,
             &response_tx,
         );
+        #[cfg(not(feature = "semantic-search"))]
+        run_request(&store, &engine, request, &response_tx);
     }
 }
 
+#[cfg(feature = "semantic-search")]
 fn run_request(
     store: &Store,
     engine: &SearchEngine,
@@ -159,6 +166,27 @@ fn run_request(
         FETCH_MULTIPLIER,
     );
     send_result(response_tx, &request, SearchPhase::Hybrid, hybrid_result);
+}
+
+#[cfg(not(feature = "semantic-search"))]
+fn run_request(
+    store: &Store,
+    engine: &SearchEngine,
+    request: SearchRequest,
+    response_tx: &Sender<SearchResponse>,
+) {
+    if request.query.trim().is_empty() {
+        send_result(response_tx, &request, SearchPhase::Text, recent_sessions(store, &request));
+        return;
+    }
+    let text_result = engine.hybrid_search(
+        &request.query,
+        None,
+        &request.filters,
+        SEARCH_LIMIT,
+        FETCH_MULTIPLIER,
+    );
+    send_result(response_tx, &request, SearchPhase::Text, text_result);
 }
 
 fn recent_sessions(store: &Store, request: &SearchRequest) -> anyhow::Result<Vec<SearchResult>> {

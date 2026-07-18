@@ -5,10 +5,14 @@ use std::process::{Command, Stdio};
 use anyhow::Result;
 use fs2::FileExt;
 
+#[cfg(feature = "semantic-search")]
 use crate::db::store::Store;
+#[cfg(feature = "semantic-search")]
 use crate::embedding::EmbeddingProvider;
 
+#[cfg(feature = "semantic-search")]
 const SESSION_EMBED_BATCH: usize = 8;
+#[cfg(feature = "semantic-search")]
 const BACKGROUND_JOB: &str = "pipeline";
 
 pub(crate) fn ensure_background_worker(sync_first: bool) -> Result<()> {
@@ -23,6 +27,7 @@ pub(crate) fn ensure_background_worker(sync_first: bool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "semantic-search")]
 pub(crate) fn run_background_worker<F>(sync_first: bool, mut sync_fn: F) -> Result<()>
 where
     F: FnMut() -> Result<()>,
@@ -62,6 +67,7 @@ where
     Ok(())
 }
 
+#[cfg(feature = "semantic-search")]
 fn process_next_session(store: &Store, provider: &EmbeddingProvider) -> Result<bool> {
     let Some(job) = store.claim_next_session_embedding_job()? else {
         return Ok(false);
@@ -81,6 +87,7 @@ fn process_next_session(store: &Store, provider: &EmbeddingProvider) -> Result<b
     }
 }
 
+#[cfg(feature = "semantic-search")]
 fn process_session(
     store: &Store,
     provider: &EmbeddingProvider,
@@ -112,6 +119,7 @@ fn process_session(
     Ok(())
 }
 
+#[cfg(feature = "semantic-search")]
 pub(crate) fn build_embedding_text(title: &str, content: &str) -> String {
     let text = format!("{title}: {content}");
     if text.chars().count() > 500 { text.chars().take(500).collect() } else { text }
