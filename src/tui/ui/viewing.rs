@@ -52,6 +52,7 @@ pub(super) fn render_viewing(f: &mut Frame, app: &App) {
     );
     let mut lines: Vec<Line> = Vec::new();
     let needles = app.viewing_search_terms();
+    let markdown_active = needles.is_empty();
     let body_width = inner_width.saturating_sub(GUTTER_WIDTH);
     let source =
         app.results.get(app.selected_index).map(|r| r.session.source.as_str()).unwrap_or("");
@@ -75,14 +76,25 @@ pub(super) fn render_viewing(f: &mut Frame, app: &App) {
         }
         lines.push(Line::from(header));
 
-        let empty: Vec<SanitizedLine> = Vec::new();
-        let cached_lines = app.viewing_sanitized_lines.get(i).unwrap_or(&empty);
-        for sl in cached_lines {
-            let body_style = Style::default().fg(THEME.text);
-            let spans = highlight_spans(&sl.text, &sl.lower, &needles, body_style);
-            for mut line in wrap_spans_to_lines(spans, body_width) {
-                line.spans.insert(0, gutter_span(selected, color));
-                lines.push(line);
+        if markdown_active {
+            let empty: Vec<Line> = Vec::new();
+            let body_lines = app.viewing_body_lines.get(i).unwrap_or(&empty);
+            for logical in body_lines {
+                for mut line in wrap_spans_to_lines(logical.spans.clone(), body_width) {
+                    line.spans.insert(0, gutter_span(selected, color));
+                    lines.push(line);
+                }
+            }
+        } else {
+            let empty: Vec<SanitizedLine> = Vec::new();
+            let cached_lines = app.viewing_sanitized_lines.get(i).unwrap_or(&empty);
+            for sl in cached_lines {
+                let body_style = Style::default().fg(THEME.text);
+                let spans = highlight_spans(&sl.text, &sl.lower, &needles, body_style);
+                for mut line in wrap_spans_to_lines(spans, body_width) {
+                    line.spans.insert(0, gutter_span(selected, color));
+                    lines.push(line);
+                }
             }
         }
         lines.push(Line::from(""));

@@ -1,4 +1,5 @@
 pub(crate) mod app;
+pub(crate) mod body;
 pub(crate) mod event;
 pub(crate) mod layout;
 pub(crate) mod markdown;

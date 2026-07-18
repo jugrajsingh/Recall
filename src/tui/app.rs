@@ -27,7 +27,7 @@ use crate::tui::search_worker::{SearchPhase, SearchRequest, SearchResponse, Sear
 use crate::tui::share_state::{
     AppMode, PendingCommandAction, PendingDelete, PendingResume, ResumeOrigin, SharePopup,
 };
-use crate::tui::text_layout::{GUTTER_WIDTH, wrap_visual_rows};
+use crate::tui::text_layout::{GUTTER_WIDTH, wrap_spans_to_lines, wrap_visual_rows};
 use crate::tui::usage_state::UsageTab;
 use crate::tui::viewing_state::{SanitizedLine, ViewingSessionSummary, build_viewing_caches};
 use crate::types::{BackgroundJobStatus, MatchSource, Message, SearchResult, SemanticProgress};
@@ -174,6 +174,8 @@ pub(crate) struct App {
     pub(crate) viewing_search_input_cursor: usize,
     pub(crate) viewing_search_status: Option<String>,
     pub(crate) viewing_sanitized_lines: Vec<Vec<SanitizedLine>>,
+    pub(crate) viewing_body_lines: Vec<Vec<ratatui::text::Line<'static>>>,
+    pub(crate) tool_visibility: crate::tui::tool_render::ToolVisibility,
     pub(crate) viewing_match_cache: Vec<usize>,
     pub(crate) source_picker: PickerState,
     pub(crate) source_picker_selection: Vec<String>,
@@ -266,6 +268,8 @@ impl App {
             viewing_search_input_cursor: 0,
             viewing_search_status: None,
             viewing_sanitized_lines: Vec::new(),
+            viewing_body_lines: Vec::new(),
+            tool_visibility: crate::tui::tool_render::ToolVisibility::default(),
             viewing_match_cache: Vec::new(),
             source_picker: PickerState::default(),
             source_picker_selection: Vec::new(),
@@ -745,6 +749,16 @@ impl App {
         );
     }
 
+    /// Rebuild BOTH the sanitized-line cache and the markdown body cache from
+    /// `self.viewing_messages`. Callers must assign `viewing_messages` first. Keeping
+    /// both caches in one method is the guard against the two ever drifting apart
+    /// (row-math in `viewing_pane` and rendering in `render_viewing` both read these).
+    fn load_viewing_caches(&mut self) {
+        self.viewing_sanitized_lines = build_viewing_caches(&self.viewing_messages);
+        self.viewing_body_lines =
+            crate::tui::body::build_viewing_bodies(&self.viewing_messages, self.tool_visibility);
+    }
+
     pub(crate) fn preview_pane(&self, inner_width: usize) -> MessagePane {
         let mut rows = Vec::with_capacity(self.preview_messages.len());
         let mut focus = Vec::with_capacity(self.preview_messages.len());
@@ -765,23 +779,39 @@ impl App {
     }
 
     pub(crate) fn viewing_pane(&self, inner_width: usize) -> MessagePane {
+        let body_width = inner_width.saturating_sub(GUTTER_WIDTH);
+        let markdown_active = self.viewing_search_terms().is_empty();
         let mut rows = Vec::with_capacity(self.viewing_messages.len());
         let mut focus = Vec::with_capacity(self.viewing_messages.len());
         for index in 0..self.viewing_messages.len() {
-            let lines = self.viewing_sanitized_lines.get(index);
-            let body: usize = lines
-                .map(|lines| {
-                    lines
-                        .iter()
-                        .map(|line| {
-                            wrap_visual_rows(&line.text, inner_width.saturating_sub(GUTTER_WIDTH))
-                                .len()
-                        })
-                        .sum()
-                })
-                .unwrap_or(0);
+            let body: usize = if markdown_active {
+                self.viewing_body_lines
+                    .get(index)
+                    .map(|lines| {
+                        lines
+                            .iter()
+                            .map(|l| wrap_spans_to_lines(l.spans.clone(), body_width).len())
+                            .sum()
+                    })
+                    .unwrap_or(0)
+            } else {
+                self.viewing_sanitized_lines
+                    .get(index)
+                    .map(|lines| {
+                        lines
+                            .iter()
+                            .map(|line| wrap_visual_rows(&line.text, body_width).len())
+                            .sum()
+                    })
+                    .unwrap_or(0)
+            };
             rows.push(body + 2);
-            focus.push(1 + usize::from(lines.is_some_and(|lines| !lines.is_empty())));
+            let has_body = if markdown_active {
+                self.viewing_body_lines.get(index).is_some_and(|l| !l.is_empty())
+            } else {
+                self.viewing_sanitized_lines.get(index).is_some_and(|l| !l.is_empty())
+            };
+            focus.push(1 + usize::from(has_body));
         }
         MessagePane::new(rows, focus)
     }
@@ -1247,6 +1277,7 @@ impl App {
                 self.viewing_search_query.clear();
                 self.viewing_search_status = None;
                 self.viewing_sanitized_lines.clear();
+                self.viewing_body_lines.clear();
                 self.viewing_match_cache.clear();
                 self.share_popup = None;
             }
@@ -1585,6 +1616,7 @@ impl App {
                         self.viewing_search_query.clear();
                         self.viewing_search_status = None;
                         self.viewing_sanitized_lines.clear();
+                        self.viewing_body_lines.clear();
                         self.viewing_match_cache.clear();
                         self.mode = AppMode::Search;
                         self.refresh_sessions_after_delete(store);
@@ -2510,8 +2542,8 @@ impl App {
                 &usage_events,
                 result.session.started_at,
             ));
-            self.viewing_sanitized_lines = build_viewing_caches(&msgs);
             self.viewing_messages = msgs;
+            self.load_viewing_caches();
             self.viewing_selected_msg = 0;
             self.viewing_scroll_offset = 0;
             self.viewing_search_query = self
@@ -2812,6 +2844,8 @@ mod tests {
             viewing_search_input_cursor: 0,
             viewing_search_status: None,
             viewing_sanitized_lines: Vec::new(),
+            viewing_body_lines: Vec::new(),
+            tool_visibility: crate::tui::tool_render::ToolVisibility::default(),
             viewing_match_cache: Vec::new(),
             source_picker: PickerState::default(),
             source_picker_selection: Vec::new(),
@@ -3089,7 +3123,7 @@ mod tests {
         app.set_terminal_size(80, 20);
         app.mode = AppMode::Viewing;
         app.viewing_messages = (0..3).map(|n| message(Role::User, None, n)).collect();
-        app.viewing_sanitized_lines = build_viewing_caches(&app.viewing_messages);
+        app.load_viewing_caches();
         app.viewing_selected_msg = 2;
 
         app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &store);
@@ -3195,7 +3229,7 @@ mod tests {
         app.set_terminal_size(80, 10);
         app.mode = AppMode::Viewing;
         app.viewing_messages = (0..5).map(|n| message(Role::User, None, n)).collect();
-        app.viewing_sanitized_lines = build_viewing_caches(&app.viewing_messages);
+        app.load_viewing_caches();
 
         let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
         let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
@@ -3221,7 +3255,7 @@ mod tests {
         app.set_terminal_size(80, 10);
         app.mode = AppMode::Viewing;
         app.viewing_messages = (0..5).map(|n| message(Role::User, None, n)).collect();
-        app.viewing_sanitized_lines = build_viewing_caches(&app.viewing_messages);
+        app.load_viewing_caches();
 
         let down = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
         let up = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
@@ -3241,7 +3275,7 @@ mod tests {
         app.set_terminal_size(80, 10);
         app.mode = AppMode::Viewing;
         app.viewing_messages = vec![tall_message(Role::User, 0)];
-        app.viewing_sanitized_lines = build_viewing_caches(&app.viewing_messages);
+        app.load_viewing_caches();
 
         let layout = viewing_layout(app.terminal_area);
         let pane = app.viewing_pane(layout.messages.width as usize);
@@ -3272,7 +3306,7 @@ mod tests {
         app.set_terminal_size(80, 10);
         app.mode = AppMode::Viewing;
         app.viewing_messages = (0..5).map(|n| message(Role::User, None, n)).collect();
-        app.viewing_sanitized_lines = build_viewing_caches(&app.viewing_messages);
+        app.load_viewing_caches();
 
         let layout = viewing_layout(app.terminal_area);
         let area = layout.scrollbar_area();
@@ -3292,7 +3326,7 @@ mod tests {
         app.set_terminal_size(80, 10);
         app.mode = AppMode::Viewing;
         app.viewing_messages = vec![message(Role::User, None, 0), tall_message(Role::Assistant, 1)];
-        app.viewing_sanitized_lines = build_viewing_caches(&app.viewing_messages);
+        app.load_viewing_caches();
 
         let layout = viewing_layout(app.terminal_area);
         let pane = app.viewing_pane(layout.messages.width as usize);
@@ -3868,5 +3902,131 @@ mod tests {
         assert!(matches!(app.mode, AppMode::Search));
         assert!(app.pending_delete.is_none());
         assert!(!store.list_sessions_by_ids(&["session1".to_string()]).unwrap().is_empty());
+    }
+
+    fn markdown_message(role: Role, seq: u32, content: &str) -> Message {
+        let mut msg = message(role, None, seq);
+        msg.content = content.to_string();
+        msg
+    }
+
+    /// The exact expression `render_viewing` uses per message: sum of wrapped-row
+    /// counts across a message's cached logical lines at `body_width`.
+    fn rendered_body_rows(lines: &[ratatui::text::Line<'static>], body_width: usize) -> usize {
+        lines.iter().map(|l| wrap_spans_to_lines(l.spans.clone(), body_width).len()).sum()
+    }
+
+    #[test]
+    fn test_should_match_render_line_count_when_markdown_body() {
+        let mut app = app_with_sources();
+        app.set_terminal_size(80, 24);
+        app.mode = AppMode::Viewing;
+        app.viewing_messages = vec![
+            markdown_message(
+                Role::Assistant,
+                0,
+                "# Heading\n\n- item one\n- item two\n\n```\nfn x() {}\nlet y = 1;\n```",
+            ),
+            markdown_message(Role::User, 1, "plain prose reply"),
+        ];
+        app.load_viewing_caches();
+
+        let layout = viewing_layout(app.terminal_area);
+        let inner_width = layout.messages.width as usize;
+        let body_width = inner_width.saturating_sub(GUTTER_WIDTH);
+        let message_count = app.viewing_messages.len();
+
+        let pane = app.viewing_pane(inner_width);
+        let expected_body_rows: usize =
+            app.viewing_body_lines.iter().map(|lines| rendered_body_rows(lines, body_width)).sum();
+        let actual_body_rows = pane.total_rows() - 2 * message_count;
+
+        assert_eq!(actual_body_rows, expected_body_rows);
+    }
+
+    #[test]
+    fn test_should_match_render_line_count_when_tool_visibility_off() {
+        let mut app = app_with_sources();
+        app.set_terminal_size(80, 24);
+        app.mode = AppMode::Viewing;
+        app.tool_visibility = crate::tui::tool_render::ToolVisibility::Off;
+        app.viewing_messages = vec![
+            // Vanishes entirely at Off visibility (content_is_all_tool_envelopes).
+            markdown_message(Role::Assistant, 0, "[Bash] {\"command\":\"ls\"}"),
+            markdown_message(Role::User, 1, "plain prose reply"),
+        ];
+        app.load_viewing_caches();
+
+        let layout = viewing_layout(app.terminal_area);
+        let inner_width = layout.messages.width as usize;
+        let body_width = inner_width.saturating_sub(GUTTER_WIDTH);
+        let message_count = app.viewing_messages.len();
+
+        let pane = app.viewing_pane(inner_width);
+        let expected_body_rows: usize =
+            app.viewing_body_lines.iter().map(|lines| rendered_body_rows(lines, body_width)).sum();
+        let actual_body_rows = pane.total_rows() - 2 * message_count;
+
+        assert_eq!(actual_body_rows, expected_body_rows);
+    }
+
+    #[test]
+    fn test_should_match_render_line_count_when_needle_active() {
+        let mut app = app_with_sources();
+        app.set_terminal_size(80, 24);
+        app.mode = AppMode::Viewing;
+        app.viewing_messages = vec![
+            markdown_message(Role::Assistant, 0, "# Heading\n\n- item one\n- item two"),
+            markdown_message(Role::User, 1, "plain prose reply mentioning heading"),
+        ];
+        app.load_viewing_caches();
+        app.viewing_search_query = "heading".to_string();
+
+        let layout = viewing_layout(app.terminal_area);
+        let inner_width = layout.messages.width as usize;
+        let body_width = inner_width.saturating_sub(GUTTER_WIDTH);
+        let message_count = app.viewing_messages.len();
+
+        let pane = app.viewing_pane(inner_width);
+        let expected_body_rows: usize = app
+            .viewing_sanitized_lines
+            .iter()
+            .map(|lines| {
+                lines
+                    .iter()
+                    .map(|line| wrap_visual_rows(&line.text, body_width).len())
+                    .sum::<usize>()
+            })
+            .sum();
+        let actual_body_rows = pane.total_rows() - 2 * message_count;
+
+        assert_eq!(actual_body_rows, expected_body_rows);
+    }
+
+    #[test]
+    fn test_should_switch_row_source_when_needle_toggles() {
+        let mut app = app_with_sources();
+        app.set_terminal_size(80, 24);
+        app.mode = AppMode::Viewing;
+        app.viewing_messages =
+            vec![markdown_message(Role::Assistant, 0, "# Heading\n\n- item one\n- item two")];
+        app.load_viewing_caches();
+
+        let layout = viewing_layout(app.terminal_area);
+        let inner_width = layout.messages.width as usize;
+
+        let markdown_rows = app.viewing_pane(inner_width).total_rows();
+
+        app.viewing_search_query = "heading".to_string();
+        let needle_rows = app.viewing_pane(inner_width).total_rows();
+
+        app.viewing_search_query.clear();
+        let restored_rows = app.viewing_pane(inner_width).total_rows();
+
+        // Both branches must produce a valid (non-panicking, positive) row count, and
+        // toggling the needle off must restore the markdown-branch total exactly.
+        assert!(markdown_rows > 0);
+        assert!(needle_rows > 0);
+        assert_eq!(markdown_rows, restored_rows);
     }
 }

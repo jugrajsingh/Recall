@@ -21,6 +21,7 @@ pub(crate) const CODE_LINE_HIGHLIGHT_MAX_BYTES: usize = 8 * 1024;
 pub(crate) const TABLE_MAX_COLS: usize = 24;
 pub(crate) const TABLE_MAX_ROWS: usize = 200;
 
+const BODY_TEXT_COLOR: Color = Color::White;
 const HEADING_COLOR: Color = Color::Cyan;
 const CODE_INLINE_COLOR: Color = Color::Yellow;
 const CODE_BLOCK_PLAIN_COLOR: Color = Color::DarkGray;
@@ -91,7 +92,7 @@ impl Walker {
     }
 
     fn active_style(&self) -> Style {
-        let mut style = Style::default();
+        let mut style = Style::default().fg(BODY_TEXT_COLOR);
         if self.heading_level.is_some() {
             style = style.fg(HEADING_COLOR).add_modifier(Modifier::BOLD);
         }

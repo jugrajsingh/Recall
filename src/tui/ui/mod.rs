@@ -604,6 +604,8 @@ mod tests {
             vec![SanitizedLine { text: "hello".to_string(), lower: "hello".to_string() }],
             vec![SanitizedLine { text: "world".to_string(), lower: "world".to_string() }],
         ];
+        app.viewing_body_lines =
+            crate::tui::body::build_viewing_bodies(&app.viewing_messages, app.tool_visibility);
         app.viewing_selected_msg = selected;
         app
     }
