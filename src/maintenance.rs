@@ -38,6 +38,7 @@ pub(crate) fn run_vacuum() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "semantic-search")]
 pub(crate) fn run_reembed(yes: bool) -> Result<()> {
     if !yes {
         if !std::io::stdin().is_terminal() {
@@ -58,6 +59,14 @@ pub(crate) fn run_reembed(yes: bool) -> Result<()> {
          the background worker rebuilds vectors on the next `recall` or `recall sync`."
     );
     Ok(())
+}
+
+#[cfg(not(feature = "semantic-search"))]
+pub(crate) fn run_reembed(_yes: bool) -> Result<()> {
+    anyhow::bail!(
+        "recall-mini has no embedding backend; there is nothing to reembed. \
+         Rebuild recall with `semantic-candle` (or `semantic-fastembed`) to enable semantic search."
+    )
 }
 
 pub(crate) fn run_worker_status() -> Result<()> {
@@ -407,7 +416,10 @@ pub(crate) fn run_config_doctor() -> Result<()> {
         };
         println!("  [{tag}] {:<12} {}", check.label, check.detail);
     }
+    #[cfg(feature = "semantic-search")]
     println!("  [info] {:<12} {}", "embedding", crate::embedding::availability_summary());
+    #[cfg(not(feature = "semantic-search"))]
+    println!("  [info] {:<12} {}", "embedding", "disabled (recall-mini, FTS5-only)");
 
     if report.has_errors() {
         std::process::exit(1);

@@ -95,6 +95,12 @@ pub(crate) fn run(format: InfoFormat) -> Result<()> {
         }
     }
 
+    let build_variant = crate::embedding::build_variant();
+    #[cfg(feature = "semantic-search")]
+    let embedding_summary: Option<String> = Some(crate::embedding::availability_summary());
+    #[cfg(not(feature = "semantic-search"))]
+    let embedding_summary: Option<String> = None;
+
     if matches!(format, InfoFormat::Json) {
         println!(
             "{}",
@@ -123,6 +129,10 @@ pub(crate) fn run(format: InfoFormat) -> Result<()> {
                     "failed_sessions": progress.failed_sessions,
                     "worker_phase": worker.phase,
                     "worker_detail": worker.detail
+                },
+                "build": {
+                    "variant": build_variant,
+                    "embedding": embedding_summary
                 }
             }))?
         );
@@ -206,6 +216,14 @@ pub(crate) fn run(format: InfoFormat) -> Result<()> {
     if let Some(phase) = worker.phase {
         println!("  Worker      {phase}");
     }
+
+    println!();
+    println!("Build");
+    println!("  Variant     {build_variant}");
+    #[cfg(feature = "semantic-search")]
+    println!("  Embedding   {}", crate::embedding::availability_summary());
+    #[cfg(not(feature = "semantic-search"))]
+    println!("  Embedding   disabled (FTS5-only build)");
 
     println!();
     println!("Tip: open the TUI and press Ctrl+S to edit settings.");

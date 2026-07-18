@@ -9,13 +9,22 @@ RESET := \033[0m
 
 # ── Build ────────────────────────────────────────────────────────────────────
 
-.PHONY: build release
+.PHONY: build release release-candle release-fastembed release-mini check-matrix
 
 build: ## Debug build
 	$(CARGO) build
 
 release: ## Release build (LTO + strip)
 	$(CARGO) build --release
+
+release-candle: ## Release build, candle backend (default)
+	$(CARGO) build --release
+
+release-fastembed: ## Release build, fastembed backend (downloads libonnxruntime)
+	$(CARGO) build --release --no-default-features --features semantic-fastembed
+
+release-mini: ## Release build, FTS5-only (no embedding backend)
+	$(CARGO) build --release --no-default-features
 
 # ── Quality ──────────────────────────────────────────────────────────────────
 
@@ -29,6 +38,12 @@ check: ## Full quality gate — format, lint, test
 	@printf '\n$(BOLD)[3/3] Running tests$(RESET)\n'
 	$(CARGO) test --workspace
 	@printf '\n$(GREEN)  ✓ All checks passed$(RESET)\n\n'
+
+check-matrix: ## Compile-check every feature matrix (no fastembed: needs network)
+	$(CARGO) check --no-default-features
+	$(CARGO) check
+	$(CARGO) check --no-default-features --features semantic-candle,semantic-search
+	@printf '\n$(GREEN)  ✓ Feature matrix compiles$(RESET)\n\n'
 
 test: ## Run tests
 	$(CARGO) test --workspace
