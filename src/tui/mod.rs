@@ -1,6 +1,7 @@
 pub(crate) mod app;
 pub(crate) mod event;
 pub(crate) mod layout;
+pub(crate) mod markdown;
 pub(crate) mod runner;
 pub(crate) mod search_state;
 pub(crate) mod search_worker;

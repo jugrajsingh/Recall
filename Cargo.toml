@@ -40,6 +40,7 @@ crossterm = "0.28"
 unicode-width = "0.2"
 fs2 = "0.4"
 pulldown-cmark = "0.13"
+syntect = { version = "5.2", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
 zip = { version = "7", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
