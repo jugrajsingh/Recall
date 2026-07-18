@@ -337,7 +337,8 @@ pub(super) fn render_preview(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(header));
         visual_row += 1;
 
-        let text: String = msg.content.chars().take(300).collect();
+        let text: String =
+            crate::tui::tool_render::summarize_envelopes(&msg.content).chars().take(300).collect();
         for line in text.lines().take(6) {
             let line = crate::utils::sanitize_line(line);
             let line = format!("  {line}");

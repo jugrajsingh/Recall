@@ -763,7 +763,10 @@ impl App {
         let mut rows = Vec::with_capacity(self.preview_messages.len());
         let mut focus = Vec::with_capacity(self.preview_messages.len());
         for msg in &self.preview_messages {
-            let text: String = msg.content.chars().take(300).collect();
+            let text: String = crate::tui::tool_render::summarize_envelopes(&msg.content)
+                .chars()
+                .take(300)
+                .collect();
             let body: usize = text
                 .lines()
                 .take(6)
@@ -1312,6 +1315,14 @@ impl App {
             }
             KeyCode::Char('v') => {
                 self.preview_current_session();
+            }
+            KeyCode::Char('t') => {
+                self.tool_visibility = self.tool_visibility.next();
+                self.viewing_body_lines = crate::tui::body::build_viewing_bodies(
+                    &self.viewing_messages,
+                    self.tool_visibility,
+                );
+                self.anchor_viewing_scroll();
             }
             KeyCode::Char('h') => {
                 self.open_handoff_target_picker();
@@ -4028,5 +4039,29 @@ mod tests {
         assert!(markdown_rows > 0);
         assert!(needle_rows > 0);
         assert_eq!(markdown_rows, restored_rows);
+    }
+
+    #[test]
+    fn test_should_rebuild_body_cache_when_tool_visibility_cycles() {
+        let mut app = app_with_sources();
+        app.mode = AppMode::Viewing;
+        app.viewing_messages =
+            vec![markdown_message(Role::Assistant, 0, "[Bash] {\"command\":\"ls\"}")];
+        app.load_viewing_caches();
+
+        assert_eq!(app.tool_visibility, crate::tui::tool_render::ToolVisibility::Trunc);
+        assert_eq!(app.viewing_body_lines[0].len(), 1);
+
+        app.handle_viewing_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert_eq!(app.tool_visibility, crate::tui::tool_render::ToolVisibility::Full);
+        assert!(!app.viewing_body_lines[0].is_empty());
+
+        app.handle_viewing_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert_eq!(app.tool_visibility, crate::tui::tool_render::ToolVisibility::Off);
+        assert!(app.viewing_body_lines[0].is_empty());
+
+        app.handle_viewing_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert_eq!(app.tool_visibility, crate::tui::tool_render::ToolVisibility::Trunc);
+        assert_eq!(app.viewing_body_lines[0].len(), 1);
     }
 }

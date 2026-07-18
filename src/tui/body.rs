@@ -10,7 +10,13 @@ use crate::types::Message;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BodyMode {
-    /// Sanitized logical lines, tool envelopes summarized, NO markdown.
+    /// Sanitized logical lines, tool envelopes summarized, NO markdown. Preview (D5)
+    /// deliberately does not call `build_message_body` at all today, since it already
+    /// truncates and highlights via its own char/line-limited path; it only reuses
+    /// `tool_render::summarize_envelopes` ahead of that truncation. `Plain` is kept as
+    /// part of this module's public contract (see the TDD tests below) and is the
+    /// route a future preview-through-`build_message_body` integration would take.
+    #[allow(dead_code)]
     Plain,
     /// Markdown-styled lines, tool envelopes summarized, DoS-capped.
     Markdown,

@@ -59,7 +59,7 @@ pub(super) fn render_viewing(f: &mut Frame, app: &App) {
 
     for (i, msg) in app.viewing_messages.iter().enumerate() {
         let selected = i == app.viewing_selected_msg;
-        let prefix = crate::utils::role_label(source, &msg.role);
+        let prefix = crate::utils::viewing_role_label(source, msg);
         let color = crate::tui::theme::role_color(&msg.role);
 
         let time_str = crate::utils::format_message_time(msg.timestamp);
@@ -120,6 +120,8 @@ pub(super) fn render_viewing(f: &mut Frame, app: &App) {
         Span::styled(" next/prev  ", Style::default().fg(THEME.text_muted)),
         Span::styled("c", Style::default().fg(THEME.accent)),
         Span::styled(" copy  ", Style::default().fg(THEME.text_muted)),
+        Span::styled("t", Style::default().fg(THEME.accent)),
+        Span::styled(" tools  ", Style::default().fg(THEME.text_muted)),
         Span::styled("e", Style::default().fg(THEME.accent)),
         Span::styled(" export  ", Style::default().fg(THEME.text_muted)),
         Span::styled("s", Style::default().fg(THEME.accent)),
@@ -160,7 +162,12 @@ pub(super) fn render_viewing(f: &mut Frame, app: &App) {
         ));
         Line::from(spans)
     } else {
-        Line::from(help_spans)
+        let mut spans = help_spans;
+        spans.push(Span::styled(
+            format!("  [{}]", app.tool_visibility.label()),
+            Style::default().fg(THEME.text_muted),
+        ));
+        Line::from(spans)
     };
 
     if let Some(ref input) = app.viewing_search_input {

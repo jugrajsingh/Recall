@@ -197,6 +197,18 @@ pub(crate) fn role_label(source: &str, role: &Role) -> &'static str {
     }
 }
 
+/// Like `role_label`, but labels an assistant turn whose entire content is tool-use
+/// envelopes as `"Tool"` (D1 presentation-layer classifier; `types::Role` stays
+/// 2-variant, this never touches the DB/export layer).
+pub(crate) fn viewing_role_label(source: &str, msg: &crate::types::Message) -> &'static str {
+    if matches!(msg.role, Role::Assistant)
+        && crate::tui::tool_render::content_is_all_tool_envelopes(&msg.content)
+    {
+        return "Tool";
+    }
+    role_label(source, &msg.role)
+}
+
 pub(crate) fn project_label(path: &str) -> String {
     let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
     match parts.len() {
@@ -450,6 +462,28 @@ mod tests {
     #[test]
     fn role_label_unknown_assistant_falls_back_to_asst() {
         assert_eq!(role_label("mystery-cli", &Role::Assistant), "Asst");
+    }
+
+    fn message(role: Role, content: &str) -> crate::types::Message {
+        crate::types::Message {
+            session_id: "session1".to_string(),
+            role,
+            content: content.to_string(),
+            timestamp: None,
+            seq: 0,
+        }
+    }
+
+    #[test]
+    fn test_should_label_tool_when_assistant_all_envelopes() {
+        let tool_msg = message(Role::Assistant, "[Bash] {\"command\":\"ls\"}");
+        assert_eq!(viewing_role_label("claude-code", &tool_msg), "Tool");
+
+        let prose_msg = message(Role::Assistant, "here is my answer");
+        assert_eq!(viewing_role_label("claude-code", &prose_msg), "Claude");
+
+        let user_msg = message(Role::User, "[Bash] {\"command\":\"ls\"}");
+        assert_eq!(viewing_role_label("claude-code", &user_msg), "You");
     }
 
     #[test]
