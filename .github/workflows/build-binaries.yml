@@ -55,7 +55,7 @@ jobs:
 
       - name: Build
         if: ${{ inputs.upload || !inputs.save-cache || steps.rust-cache.outputs.cache-hit != 'true' }}
-        run: cargo build --release --target ${{ matrix.target }} -p recall -p rx
+        run: cargo build --release --target ${{ matrix.target }} -p recall
 
       - name: Record built commit
         if: inputs.upload
@@ -66,13 +66,13 @@ jobs:
         if: inputs.upload && runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ matrix.artifact }}.tar.gz recall rx
+          tar czf ../../../${{ matrix.artifact }}.tar.gz recall
           cd ../../..
 
       - name: Package (windows)
         if: inputs.upload && runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path target/${{ matrix.target }}/release/recall.exe,target/${{ matrix.target }}/release/rx.exe -DestinationPath ${{ matrix.artifact }}.zip
+        run: Compress-Archive -Path target/${{ matrix.target }}/release/recall.exe -DestinationPath ${{ matrix.artifact }}.zip
 
       - uses: actions/upload-artifact@v5
         if: inputs.upload

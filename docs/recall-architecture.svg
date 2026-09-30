@@ -42,7 +42,7 @@
 
   <rect x="680" y="148" width="276" height="114" class="box" fill="#edf7ef" stroke="#319760"/>
   <text x="694" y="174" class="t">rx launcher</text>
-  <text x="694" y="191" class="p">crates/rx/ · independent binary</text>
+  <text x="694" y="191" class="p">github.com/samzong/rx · separate repository</text>
   <text x="694" y="212" class="d">native harness launch · hosted mode</text>
   <text x="694" y="230" class="d">provider routing · credential injection</text>
   <text x="694" y="248" class="p">picker + aliases · never reads recall.db</text>
